@@ -63,6 +63,7 @@ Every `api.runtime` namespace and the page that documents it.
 | `api.runtime.gateway`            | [Gateway and nodes](/plugins/sdk-runtime/gateway-and-nodes#api-runtime-gateway) |
 | `api.runtime.hooks`              | [Background work](/plugins/sdk-runtime/background-work#api-runtime-hooks)       |
 | `api.runtime.subagent`           | [Background work](/plugins/sdk-runtime/background-work#api-runtime-subagent)    |
+| `api.runtime.managedRuns`        | [Background work](/plugins/sdk-runtime/background-work#api-runtime-managedruns) |
 | `api.runtime.sandbox`            | [Agent and sessions](/plugins/sdk-runtime/agent#api-runtime-sandbox)            |
 | `api.runtime.nodes`              | [Gateway and nodes](/plugins/sdk-runtime/gateway-and-nodes#api-runtime-nodes)   |
 | `api.runtime.tts`                | [Media helpers](/plugins/sdk-runtime/media#api-runtime-tts)                     |

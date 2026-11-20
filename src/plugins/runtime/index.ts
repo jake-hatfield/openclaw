@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { resolveSandboxRuntimeStatus } from "../../agents/sandbox/runtime-status.js";
 import { resolveSandboxWorkspaceAuthority } from "../../agents/sandbox/workspace-authority.js";
@@ -36,6 +37,7 @@ import { createRuntimeLogging } from "./runtime-logging.js";
 import { createRuntimeMedia } from "./runtime-media.js";
 import { subscribeRuntimeSessionChanges } from "./session-changes.js";
 import type { PluginRuntimeBase, PluginRuntimeFactory, PluginRuntime } from "./types.js";
+import { PluginWorktreeValidationError } from "./worktree-errors.js";
 
 const loadTtsRuntime = createLazyRuntimeModule(() => import("../../plugin-sdk/tts-runtime.js"));
 const loadTtsRequestRuntime = createLazyRuntimeModule(() => import("../../tts/runtime-api.js"));
@@ -130,6 +132,21 @@ function createRuntimeLlmFacade(getConfig: PluginRuntimeBase["getConfig"]): Plug
   };
 }
 
+function createUnavailableManagedRunsRuntime(): PluginRuntime["managedRuns"] {
+  const unavailable = () => {
+    throw new Error("Plugin managed runs are only available through a bound plugin registry runtime.");
+  };
+  return {
+    admit: unavailable,
+    find: unavailable,
+    inspect: unavailable,
+    cancel: unavailable,
+    admitVerifier: unavailable,
+    inspectVerifier: unavailable,
+    cancelVerifier: unavailable,
+  };
+}
+
 function createUnavailableSubagentRuntime(): PluginRuntime["subagent"] {
   const unavailable = () => {
     throw new RequestScopedSubagentRuntimeError();
@@ -139,6 +156,7 @@ function createUnavailableSubagentRuntime(): PluginRuntime["subagent"] {
     forkSession: unavailable,
     run: unavailable,
     waitForRun: unavailable,
+    abortManagedRun: unavailable,
     getSessionMessages: unavailable,
     deleteSession: unavailable,
   };
@@ -157,10 +175,103 @@ function createUnavailableNodesRuntime(): PluginRuntime["nodes"] {
 
 function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
   const loadService = () => import("../../agents/worktrees/service.js");
+  type ExactWorktreeTarget = Parameters<PluginRuntime["worktrees"]["releaseExact"]>[0];
+  type RegistryRecord = Awaited<
+    ReturnType<
+      import("../../agents/worktrees/service.js").ManagedWorktreeService["listRegistryRecords"]
+    >
+  >[number];
+  const exactWorktreeMatches = (record: RegistryRecord, params: ExactWorktreeTarget) =>
+    record.id === params.id &&
+    record.path === params.path &&
+    record.branch === params.branch &&
+    record.repoRoot === params.repoRoot &&
+    record.repoFingerprint === params.repoFingerprint &&
+    record.baseRef === params.baseRef &&
+    record.createdAt === params.createdAt &&
+    record.ownerKind === params.ownerKind &&
+    record.ownerId === params.ownerId;
+  const withExactWorktree = async <T>(
+    params: ExactWorktreeTarget,
+    run: (service: import("../../agents/worktrees/service.js").ManagedWorktreeService) => Promise<T>,
+  ): Promise<T | undefined> =>
+    runWithLocalStateOwner({
+      method: "worktrees.exact",
+      params: {},
+      target: params.path,
+      onForeignOwner: "refuse",
+      runLocal: async ({ env, config, assertCurrent }) => {
+        const { ManagedWorktreeService } = await loadService();
+        const service = new ManagedWorktreeService({ env, getConfig: () => config });
+        assertCurrent();
+        const record = await service.findLiveByOwner(params.ownerKind, params.ownerId);
+        assertCurrent();
+        if (!record || !exactWorktreeMatches(record, params)) {
+          return undefined;
+        }
+        await service.acquire(record.id, { commitGuard: assertCurrent });
+        assertCurrent();
+        return await run(service);
+      },
+    });
+  const withExactCleanup = async <T>(
+    params: ExactWorktreeTarget,
+    run: (service: import("../../agents/worktrees/service.js").ManagedWorktreeService) => Promise<T>,
+  ): Promise<T | "already_retired" | "mismatch"> =>
+    runWithLocalStateOwner({
+      method: "worktrees.exactCleanup",
+      params: {},
+      target: params.path,
+      onForeignOwner: "refuse",
+      runLocal: async ({ env, config, assertCurrent }) => {
+        const { ManagedWorktreeService } = await loadService();
+        const service = new ManagedWorktreeService({ env, getConfig: () => config });
+        assertCurrent();
+        const live = await service.findLiveByOwner(params.ownerKind, params.ownerId);
+        assertCurrent();
+        if (live) {
+          if (!exactWorktreeMatches(live, params)) {
+            return "mismatch";
+          }
+          await service.acquire(live.id, { commitGuard: assertCurrent });
+          assertCurrent();
+          return await run(service);
+        }
+        const historical = (await service.listRegistryRecords()).find(
+          (record) => record.id === params.id,
+        );
+        assertCurrent();
+        return historical?.removedAt !== undefined && exactWorktreeMatches(historical, params)
+          ? "already_retired"
+          : "mismatch";
+      },
+    });
   return {
     async resolveCheckoutRoot(params) {
       const { findGitCheckoutRoot } = await import("../../agents/worktrees/git.js");
       return findGitCheckoutRoot(params.path) ?? undefined;
+    },
+    async resolveCommit(params) {
+      return runWithLocalStateOwner({
+        method: "worktrees.resolveCommit",
+        params: {},
+        target: params.repoRoot,
+        onForeignOwner: "refuse",
+        runLocal: async ({ assertCurrent }) => {
+          const { requireGit } = await import("../../agents/worktrees/git.js");
+          assertCurrent();
+          const commit = await requireGit(
+            params.repoRoot,
+            ["rev-parse", "--verify", "--end-of-options", params.ref + "^{commit}"],
+            { beforeRun: assertCurrent },
+          );
+          assertCurrent();
+          if (!/^[a-f0-9]{40,64}$/u.test(commit)) {
+            throw new Error("Managed run base did not resolve to an exact Git commit.");
+          }
+          return commit;
+        },
+      });
     },
     async hasSelfContainedCheckoutMetadata(params) {
       const { hasSelfContainedGitMetadata } = await import("../../agents/worktrees/git.js");
@@ -183,9 +294,204 @@ function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
           const record = await service.create({ ...params, signal, commitGuard });
           commitGuard();
           await service.acquire(record.id, { signal, commitGuard });
-          return { id: record.id, path: record.path, branch: record.branch };
+          const { requireGit } = await import("../../agents/worktrees/git.js");
+          const baseCommit = await requireGit(record.path, [
+            "rev-parse",
+            "--verify",
+            "HEAD^{commit}",
+          ]);
+          commitGuard();
+          if (params.checkoutCommit && baseCommit !== params.checkoutCommit) {
+            await service.release(record.id);
+            await service.removeIfLossless(record.id);
+            throw new PluginWorktreeValidationError(
+              "checkout_commit_mismatch",
+              "Managed worktree adoption did not match the pinned checkout commit.",
+            );
+          }
+          return {
+            id: record.id,
+            path: record.path,
+            branch: record.branch,
+            repoRoot: record.repoRoot,
+            repoFingerprint: record.repoFingerprint,
+            baseRef: record.baseRef,
+            baseCommit,
+            createdAt: record.createdAt,
+          };
         },
       });
+    },
+    async acquire(params) {
+      return (
+        (await withExactWorktree(params, async (service) => {
+          await service.acquire(params.id);
+          return true;
+        })) === true
+      );
+    },
+    async captureGitArtifact(params) {
+      const artifact = await withExactWorktree(params, async () => {
+        const { requireGit, runGit } = await import("../../agents/worktrees/git.js");
+        const status = await requireGit(params.path, [
+          "status",
+          "--porcelain=v1",
+          "-z",
+          "--untracked-files=all",
+        ]);
+        if (status.length > 0) {
+          throw new PluginWorktreeValidationError(
+            "dirty_checkout",
+            "Managed run artifact checkout is not clean; commit all output first.",
+          );
+        }
+        const commit = await requireGit(params.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
+        if (!/^[a-f0-9]{40,64}$/u.test(commit)) {
+          throw new PluginWorktreeValidationError(
+            "invalid_commit",
+            "Managed run output did not resolve to an exact Git commit.",
+          );
+        }
+        const ancestry = await runGit(params.path, [
+          "merge-base",
+          "--is-ancestor",
+          params.baseCommit,
+          commit,
+        ]);
+        if (ancestry.termination !== "exit" || ancestry.code !== 0) {
+          throw new PluginWorktreeValidationError(
+            "non_descendant_commit",
+            "Managed run artifact is not a descendant of its pinned base commit.",
+          );
+        }
+        const retentionRef =
+          "refs/openclaw/managed-runs/" +
+          createHash("sha256")
+            .update(
+              [params.repoFingerprint, params.id, params.ownerKind, params.ownerId, commit].join("\0"),
+            )
+            .digest("hex");
+        const existing = await runGit(params.repoRoot, [
+          "rev-parse",
+          "--verify",
+          "--quiet",
+          retentionRef + "^{commit}",
+        ]);
+        if (existing.termination === "exit" && existing.code === 0) {
+          if (existing.stdout.trim() !== commit) {
+            throw new PluginWorktreeValidationError(
+              "identity_mismatch",
+              "Managed run artifact retention ref already names another commit.",
+            );
+          }
+        } else if (existing.termination === "exit" && existing.code === 1) {
+          const created = await runGit(params.repoRoot, ["update-ref", retentionRef, commit, ""]);
+          if (created.termination !== "exit" || created.code !== 0) {
+            const raced = await runGit(params.repoRoot, [
+              "rev-parse",
+              "--verify",
+              "--quiet",
+              retentionRef + "^{commit}",
+            ]);
+            if (
+              raced.termination !== "exit" ||
+              raced.code !== 0 ||
+              raced.stdout.trim() !== commit
+            ) {
+              throw new PluginWorktreeValidationError(
+                "identity_mismatch",
+                "Managed run artifact retention ref could not be created exactly.",
+              );
+            }
+          }
+        } else {
+          throw new Error("Managed run artifact retention ref lookup failed.");
+        }
+        return { commit, retentionRef };
+      });
+      if (!artifact) {
+        throw new PluginWorktreeValidationError(
+          "identity_mismatch",
+          "Managed run worktree owner or identity no longer matches.",
+        );
+      }
+      return artifact;
+    },
+    async releaseGitArtifact(params) {
+      if (
+        !/^refs\/openclaw\/managed-runs\/[a-f0-9]{64}$/u.test(params.retentionRef) ||
+        !/^[a-f0-9]{40,64}$/u.test(params.commit)
+      ) {
+        return "mismatch";
+      }
+      return await runWithLocalStateOwner({
+        method: "worktrees.releaseGitArtifact",
+        params: {},
+        target: params.repoRoot,
+        onForeignOwner: "refuse",
+        runLocal: async ({ assertCurrent }) => {
+          const { runGit } = await import("../../agents/worktrees/git.js");
+          assertCurrent();
+          const current = await runGit(params.repoRoot, [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            params.retentionRef + "^{commit}",
+          ]);
+          assertCurrent();
+          if (current.termination === "exit" && current.code === 1) {
+            return "already_released" as const;
+          }
+          if (current.termination !== "exit" || current.code !== 0) {
+            throw new Error("Managed run artifact retention ref lookup failed.");
+          }
+          if (current.stdout.trim() !== params.commit) {
+            return "mismatch" as const;
+          }
+          const deleted = await runGit(params.repoRoot, [
+            "update-ref",
+            "-d",
+            params.retentionRef,
+            params.commit,
+          ]);
+          assertCurrent();
+          if (deleted.termination === "exit" && deleted.code === 0) {
+            return "released" as const;
+          }
+          const after = await runGit(params.repoRoot, [
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            params.retentionRef + "^{commit}",
+          ]);
+          if (after.termination === "exit" && after.code === 1) {
+            return "already_released" as const;
+          }
+          if (after.termination !== "exit" || after.code !== 0) {
+            throw new Error("Managed run artifact retention ref reconciliation failed.");
+          }
+          return "mismatch" as const;
+        },
+      });
+    },
+    async assertPinnedCommit(params) {
+      const matched = await withExactWorktree(params, async () => {
+        const { requireGit } = await import("../../agents/worktrees/git.js");
+        const commit = await requireGit(params.path, ["rev-parse", "--verify", "HEAD^{commit}"]);
+        if (commit !== params.commit) {
+          throw new PluginWorktreeValidationError(
+            "pinned_commit_moved",
+            "Managed verifier checkout moved from its immutable artifact commit.",
+          );
+        }
+        return true;
+      });
+      if (!matched) {
+        throw new PluginWorktreeValidationError(
+          "identity_mismatch",
+          "Managed verifier worktree owner or identity no longer matches.",
+        );
+      }
     },
     async release(params) {
       return runWithLocalStateOwner({
@@ -193,12 +499,12 @@ function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
         params: {},
         target: params.path,
         onForeignOwner: "refuse",
-        runLocal: async ({ env, config, signal, assertCurrent }) => {
+        runLocal: async ({ env, config, assertCurrent }) => {
           const { ManagedWorktreeService } = await loadService();
           assertCurrent();
           await new ManagedWorktreeService({ env, getConfig: () => config }).releaseByPath(
             params.path,
-            { signal, commitGuard: assertCurrent },
+            { commitGuard: assertCurrent },
           );
         },
       });
@@ -209,19 +515,26 @@ function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
         params: {},
         target: params.path,
         onForeignOwner: "refuse",
-        runLocal: async ({ env, config, signal, assertCurrent }) => {
+        runLocal: async ({ env, config, assertCurrent }) => {
           const { ManagedWorktreeService } = await loadService();
           assertCurrent();
-          return new ManagedWorktreeService({
-            env,
-            getConfig: () => config,
-          }).removeIfLosslessByPath(
-            params.path,
-            { ownerKind: params.ownerKind, ownerId: params.ownerId },
-            { signal, commitGuard: assertCurrent },
-          );
+          return await new ManagedWorktreeService({ env, getConfig: () => config })
+            .removeIfLosslessByPath(params.path, params, { commitGuard: assertCurrent });
         },
       });
+    },
+    async releaseExact(params) {
+      return await withExactCleanup(params, async (service) => {
+        await service.release(params.id);
+        return "released" as const;
+      });
+    },
+    async removeIfLosslessExact(params) {
+      return await withExactCleanup(params, async (service) =>
+        (await service.removeIfLossless(params.id))
+          ? ("removed" as const)
+          : ("retained" as const),
+      );
     },
   };
 }
@@ -238,19 +551,8 @@ function createRuntimeSandbox(agent: PluginRuntime["agent"]): PluginRuntime["san
           sessionKey: params.sessionKey,
           ...(params.storePath ? { storePath: params.storePath } : {}),
         });
-  return {
-    resolveWorkspaceAuthority(params) {
-      const memory = captureMemoryExactSessionReader(params);
-      const sessionEntry = readCurrentEntry(params, memory);
-      const preparedRuntimeStatus = resolveSandboxRuntimeStatus({
-        cfg: params.config,
-        agentId: params.agentId,
-        sessionKey: params.sessionKey,
-        preparedSessionEntry: sessionEntry ?? null,
-      });
-      return resolveSandboxWorkspaceAuthority({ ...params, sessionEntry, preparedRuntimeStatus });
-    },
-    async prepareWorkspaceAuthority(input) {
+  const withPreparedWorkspaceAuthority: PluginRuntime["sandbox"]["withPreparedWorkspaceAuthority"] =
+    async (input, run) => {
       const params = { ...input };
       const memory = captureMemoryExactSessionReader(params);
       const sessionEntry = await agent.session.getSessionEntryAsync({
@@ -293,7 +595,7 @@ function createRuntimeSandbox(agent: PluginRuntime["agent"]): PluginRuntime["san
         }),
       );
       if (!authority.sandboxed || authority.confinementError) {
-        return authority;
+        return await run(authority);
       }
       const { resolveSandboxContext } = await import("../../agents/sandbox/context.js");
       assertCurrent();
@@ -308,11 +610,26 @@ function createRuntimeSandbox(agent: PluginRuntime["agent"]): PluginRuntime["san
       });
       try {
         assertCurrent();
-        return authority;
+        return await run(authority);
       } finally {
         sandbox?.[Symbol.dispose]?.();
       }
+    };
+  return {
+    resolveWorkspaceAuthority(params) {
+      const memory = captureMemoryExactSessionReader(params);
+      const sessionEntry = readCurrentEntry(params, memory);
+      const preparedRuntimeStatus = resolveSandboxRuntimeStatus({
+        cfg: params.config,
+        agentId: params.agentId,
+        sessionKey: params.sessionKey,
+        preparedSessionEntry: sessionEntry ?? null,
+      });
+      return resolveSandboxWorkspaceAuthority({ ...params, sessionEntry, preparedRuntimeStatus });
     },
+    prepareWorkspaceAuthority: (params) =>
+      withPreparedWorkspaceAuthority(params, async (authority) => authority),
+    withPreparedWorkspaceAuthority,
   };
 }
 
@@ -339,6 +656,7 @@ export const createPluginRuntime: PluginRuntimeFactory = (
         throw new Error("Plugin hook runtime is only available inside the Gateway.");
       },
     },
+    managedRuns: createUnavailableManagedRunsRuntime(),
     subagent: _options.subagent ?? createUnavailableSubagentRuntime(),
     nodes: _options.nodes ?? createUnavailableNodesRuntime(),
     sandbox: createRuntimeSandbox(agent),

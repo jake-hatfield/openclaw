@@ -12,6 +12,8 @@ import {
   type OpenAsyncKeyedStoreOptions,
 } from "../plugin-state/plugin-state-store.js";
 import { createLazyRuntimeSurface } from "../shared/lazy-runtime.js";
+import { createPluginManagedRunsRuntime } from "./managed-runs.js";
+import type { ManagedRunRecord } from "./runtime/types-managed-runs.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
 import { createPluginRuntimeKeyedStore } from "./plugin-runtime-keyed-store.js";
 import { capturePluginStateOperationModuleSource } from "./plugin-state-operation-source.js";
@@ -168,6 +170,7 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
         return result;
       });
     const facades = createPluginRuntimeFacades(invokeSelectedRuntime);
+    let managedRunsRuntime: PluginRuntime["managedRuns"] | undefined;
     let scopedAgentRuntime:
       | { source: PluginRuntime["agent"]; value: PluginRuntime["agent"] }
       | undefined;
@@ -177,6 +180,48 @@ export function createPluginRuntimeResolver(state: PluginRegistryState) {
     const runtime = new Proxy(registryParams.runtime, {
       get(_target, prop, receiver) {
         const getRuntimeProperty = () => readRuntimeProperty(record, prop, receiver);
+        if (prop === "managedRuns") {
+          if (!managedRunsRuntime) {
+            const runtimeStores = createPluginStateRuntimeStores(
+              pluginId,
+              assertRuntimeCurrent,
+              () =>
+                capturePluginStateOperationModuleSource(
+                  getPluginInstance(record),
+                  assertRuntimeCurrent,
+                ),
+            );
+            const managed = createPluginManagedRunsRuntime({
+              pluginId,
+              assertCurrent: assertRuntimeCurrent,
+              store: runtimeStores.openKeyedStoreV2<ManagedRunRecord>({
+                namespace: "managed-runs-v1",
+                retention: "retained",
+              }),
+              runtime: {
+                agent: readRuntimeProperty(record, "agent", registryParams.runtime),
+                config: readRuntimeProperty(record, "config", registryParams.runtime),
+                gateway: readRuntimeProperty(record, "gateway", registryParams.runtime),
+                sandbox: readRuntimeProperty(record, "sandbox", registryParams.runtime),
+                subagent: readRuntimeProperty(record, "subagent", registryParams.runtime),
+                worktrees: readRuntimeProperty(record, "worktrees", registryParams.runtime),
+              },
+            });
+            managedRunsRuntime = {
+              admit: (params) => runWithCurrentPluginScope(() => managed.admit(params)),
+              find: (params) => runWithCurrentPluginScope(() => managed.find(params)),
+              inspect: (params) => runWithCurrentPluginScope(() => managed.inspect(params)),
+              cancel: (params) => runWithCurrentPluginScope(() => managed.cancel(params)),
+              admitVerifier: (params) =>
+                runWithCurrentPluginScope(() => managed.admitVerifier(params)),
+              inspectVerifier: (params) =>
+                runWithCurrentPluginScope(() => managed.inspectVerifier(params)),
+              cancelVerifier: (params) =>
+                runWithCurrentPluginScope(() => managed.cancelVerifier(params)),
+            };
+          }
+          return managedRunsRuntime;
+        }
         if (prop === "state") {
           const baseState = getRuntimeProperty();
           return {

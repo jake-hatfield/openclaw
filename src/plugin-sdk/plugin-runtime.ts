@@ -29,6 +29,7 @@ export type {
 } from "../plugins/types.js";
 export { getPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 export type { PluginRuntime, RuntimeLogger } from "../plugins/runtime/types.js";
+export type * from "../plugins/runtime/types-managed-runs.js";
 
 export { getGlobalHookRunner } from "../plugins/hook-runner-global.js";
 export { getPluginCommandSpecs } from "../plugins/command-specs.js";

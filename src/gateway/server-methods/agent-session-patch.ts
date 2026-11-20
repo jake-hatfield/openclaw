@@ -177,10 +177,28 @@ export async function buildAgentSessionPatch(
     requestLabel?: string;
     explicitSessionKey?: string;
     pluginOwnerId?: string;
+    pluginManagedRun?: { version: 1; runId: string; requestFingerprint: string };
     fallbackSessionId: string;
     touchInteraction: boolean;
   },
 ): Promise<AgentSessionPatchBuild> {
+  const pluginManagedRun = params.pluginManagedRun;
+  if (pluginManagedRun) {
+    if (!params.pluginOwnerId) {
+      throw new Error("Managed-run admission requires a plugin owner.");
+    }
+    const existing = params.freshEntry?.pluginManagedRun;
+    if (
+      params.freshEntry &&
+      (!existing ||
+        existing.version !== pluginManagedRun.version ||
+        existing.pluginId !== params.pluginOwnerId ||
+        existing.runId !== pluginManagedRun.runId ||
+        existing.requestFingerprint !== pluginManagedRun.requestFingerprint)
+    ) {
+      throw new Error("Managed-run session ownership or fingerprint collision detected.");
+    }
+  }
   const reuse = await evaluateAgentSessionReuse(params);
   const automaticResetReason = reuse.automaticResetReason;
   const storedSpawnedBy = normalizeOptionalString(params.freshEntry?.spawnedBy);
@@ -303,6 +321,15 @@ export async function buildAgentSessionPatch(
     // Plugin ownership is creation-only; existing sessions keep their original owner.
     ...(params.freshEntry === undefined && params.pluginOwnerId
       ? { pluginOwnerId: params.pluginOwnerId }
+      : {}),
+    ...(params.freshEntry === undefined && params.pluginOwnerId && pluginManagedRun
+      ? {
+          modelSelectionLocked: true,
+          pluginManagedRun: {
+            ...pluginManagedRun,
+            pluginId: params.pluginOwnerId,
+          },
+        }
       : {}),
     ...(shouldClearRotatedState || shouldClearTerminalState
       ? {

@@ -78,6 +78,25 @@ it.each(cases)(
   },
 );
 
+it("retains the durable managed-run acceptance receipt in sharing facts", () => {
+  const pluginManagedRun = {
+    version: 1 as const,
+    pluginId: "plugin-1",
+    runId: "run-1",
+    requestFingerprint: "fingerprint-1",
+    acceptedAt: 1_000,
+  };
+  const retained = projectSessionSharingEntry({
+    sessionId,
+    updatedAt: 1_000,
+    pluginOwnerId: "plugin-1",
+    pluginManagedRun,
+  });
+
+  expect(retained.pluginManagedRun).toEqual(pluginManagedRun);
+  expect(retained.pluginManagedRun).not.toBe(pluginManagedRun);
+});
+
 it("retains independent nested lifecycle records after the source entry changes", () => {
   const providerReview = {
     id: "review-1",

@@ -6,6 +6,7 @@ import type { AgentWaitResult } from "../../agents/run-wait.types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { OperatorScope } from "../../gateway/operator-scopes.js";
 import type { LlmCompleteUsage, PluginRuntimeCore, RuntimeLogger } from "./types-core.js";
+import type { PluginRuntimeManagedRuns } from "./types-managed-runs.js";
 import type {
   RuntimeSessionFactsResult,
   RuntimeSessionFactsSelection,
@@ -13,6 +14,7 @@ import type {
 } from "./types-session-facts.js";
 
 export type { RuntimeLogger };
+export type * from "./types-managed-runs.js";
 
 type PluginRuntimeChannel = import("./types-channel.js").PluginRuntimeChannel;
 
@@ -39,6 +41,12 @@ type SubagentRunParams = {
   completionDelivery?: "current-requester";
   idempotencyKey?: string;
   cwd?: string;
+  /** Host-only durable admission binding used by the managed-run facade. */
+  managedRun?: {
+    version: 1;
+    runId: string;
+    requestFingerprint: string;
+  };
 };
 
 type SubagentCompleteParams = {
@@ -54,7 +62,27 @@ type PluginManagedWorktree = {
   id: string;
   path: string;
   branch: string;
+  repoRoot: string;
+  repoFingerprint: string;
+  baseRef: string;
+  baseCommit: string;
+  createdAt: number;
 };
+
+type PluginManagedWorktreeOwner = {
+  ownerKind: "workboard";
+  ownerId: string;
+};
+
+type PluginManagedWorktreeTarget = PluginManagedWorktree & PluginManagedWorktreeOwner;
+
+type PluginManagedWorktreeReleaseResult = "released" | "already_retired" | "mismatch";
+
+type PluginManagedWorktreeRemovalResult =
+  | "removed"
+  | "already_retired"
+  | "retained"
+  | "mismatch";
 
 type SubagentRunResult = {
   runId: string;
@@ -70,6 +98,14 @@ type SubagentRunResult = {
 type SubagentWaitParams = {
   runId: string;
   timeoutMs?: number;
+};
+
+type SubagentAbortManagedRunParams = {
+  runId: string;
+  sessionKey: string;
+  sessionId: string;
+  lifecycleRevision: string;
+  requestFingerprint: string;
 };
 
 type SubagentGetSessionMessagesParams = {
@@ -194,6 +230,8 @@ export type PluginRuntime = PluginRuntimeCore & {
         }
     >;
   };
+  /** Operator-gated, plugin-owned, version-pinned worktree runs. */
+  managedRuns: PluginRuntimeManagedRuns;
   subagent: {
     /** Fresh, tool-free background inference under the existing subagent model policy. */
     complete: (params: SubagentCompleteParams) => Promise<{ text: string }>;
@@ -206,6 +244,8 @@ export type PluginRuntime = PluginRuntimeCore & {
     }) => Promise<{ text: string; usage?: LlmCompleteUsage }>;
     run: (params: SubagentRunParams) => Promise<SubagentRunResult>;
     waitForRun: (params: SubagentWaitParams) => Promise<AgentWaitResult>;
+    /** Abort only the exact plugin-owned managed-run session incarnation. */
+    abortManagedRun: (params: SubagentAbortManagedRunParams) => Promise<{ aborted: boolean }>;
     getSessionMessages: (
       params: SubagentGetSessionMessagesParams,
     ) => Promise<SubagentGetSessionMessagesResult>;
@@ -242,24 +282,57 @@ export type PluginRuntime = PluginRuntimeCore & {
         workspaceDir: string;
       },
     ) => Promise<ReturnType<PluginRuntime["sandbox"]["resolveWorkspaceAuthority"]>>;
+    /** Hold the prepared sandbox/workspace binding through the actual run admission callback. */
+    withPreparedWorkspaceAuthority: <T>(
+      params: Parameters<PluginRuntime["sandbox"]["prepareWorkspaceAuthority"]>[0],
+      run: (
+        authority: ReturnType<PluginRuntime["sandbox"]["resolveWorkspaceAuthority"]>,
+      ) => Promise<T>,
+    ) => Promise<T>;
   };
   worktrees: {
     resolveCheckoutRoot: (params: { path: string }) => Promise<string | undefined>;
+    resolveCommit: (params: { repoRoot: string; ref: string }) => Promise<string>;
     hasSelfContainedCheckoutMetadata?: (params: { path: string }) => Promise<boolean>;
     create: (params: {
       repoRoot: string;
       name: string;
       baseRef?: string;
+      checkoutCommit?: string;
       ownerKind: "workboard";
       ownerId: string;
       commitGuard?: () => void;
     }) => Promise<PluginManagedWorktree>;
+    /** Reacquire a durable registry lease only when the exact owner and identity still match. */
+    acquire: (params: PluginManagedWorktreeTarget) => Promise<boolean>;
+    /** Inspect a clean descendant commit from the exact managed checkout. */
+    captureGitArtifact: (
+      params: PluginManagedWorktreeTarget & { baseCommit: string },
+    ) => Promise<{ commit: string; retentionRef: string }>;
+    /** Release the dedicated reachability ref only when it still names the exact artifact. */
+    releaseGitArtifact: (params: {
+      repoRoot: string;
+      retentionRef: string;
+      commit: string;
+    }) => Promise<"released" | "already_released" | "mismatch">;
+    /** Require the exact managed checkout to still point at the immutable verifier commit. */
+    assertPinnedCommit: (
+      params: PluginManagedWorktreeTarget & { commit: string },
+    ) => Promise<void>;
+    /** Legacy path release retained for existing plugin callers. */
     release: (params: { path: string }) => Promise<void>;
-    removeIfLossless: (params: {
-      path: string;
-      ownerKind: "workboard";
-      ownerId: string;
-    }) => Promise<boolean>;
+    /** Legacy owner-fenced path cleanup retained for existing plugin callers. */
+    removeIfLossless: (
+      params: { path: string } & PluginManagedWorktreeOwner,
+    ) => Promise<boolean>;
+    /** Idempotent cleanup fenced to the complete durable worktree incarnation. */
+    releaseExact: (
+      params: PluginManagedWorktreeTarget,
+    ) => Promise<PluginManagedWorktreeReleaseResult>;
+    /** Exact lossless cleanup that distinguishes retirement from replacement. */
+    removeIfLosslessExact: (
+      params: PluginManagedWorktreeTarget,
+    ) => Promise<PluginManagedWorktreeRemovalResult>;
   };
   channel: PluginRuntimeChannel;
 };

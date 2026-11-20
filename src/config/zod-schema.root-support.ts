@@ -164,6 +164,46 @@ export const PluginEntrySchema = z.strictObject({
       allowedModels: z.array(z.string()).optional(),
     })
     .optional(),
+  managedRuns: z
+    .strictObject({
+      /** Managed execution is denied unless explicitly enabled for this plugin. */
+      enabled: z.boolean().optional(),
+      agentAllowlist: z.array(z.string().trim().min(1)).optional(),
+      verifierAgentAllowlist: z.array(z.string().trim().min(1)).optional(),
+      /** Worker runs require a sandbox by default; writable authority is always required. */
+      requireSandbox: z.boolean().optional(),
+      projects: z
+        .array(
+          z.strictObject({
+            projectId: z.string().trim().min(1),
+            repoRoot: z.string().trim().min(1),
+            /** Exact refs only: patterns and implicit defaults are unsupported. */
+            baseRefs: z.array(z.string().trim().min(1)).min(1),
+          }),
+        )
+        .optional(),
+    })
+    .superRefine((value, ctx) => {
+      const projectIds = new Set<string>();
+      for (const [index, project] of (value.projects ?? []).entries()) {
+        if (projectIds.has(project.projectId)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["projects", index, "projectId"],
+            message: "managed run projectId registrations must be unique",
+          });
+        }
+        projectIds.add(project.projectId);
+        if (new Set(project.baseRefs).size !== project.baseRefs.length) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["projects", index, "baseRefs"],
+            message: "managed run baseRefs must be unique exact refs",
+          });
+        }
+      }
+    })
+    .optional(),
   llm: z
     .strictObject({
       /** Explicitly allow this plugin to request a model override for api.runtime.llm.complete. */

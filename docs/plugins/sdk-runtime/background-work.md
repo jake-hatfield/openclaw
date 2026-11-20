@@ -51,6 +51,74 @@ Start agent work in the background: hook-dispatched turns for external content a
     hooks endpoint.
 
   </Accordion>
+  <Accordion title="api.runtime.managedRuns">
+    Run operator-registered, version-pinned repository work under the calling
+    plugin's exact lifecycle and SQLite state owner. This surface is denied
+    unless `plugins.entries.<id>.managedRuns.enabled` is `true`, the worker is in
+    `agentAllowlist`, and `projectId`, `repoRoot`, and `baseRef` match an exact
+    project registration. Worker sandboxing is required by default and workspace
+    authority must be writable.
+
+    `admit({ key, projectId, agentId, baseRef, message })` first resolves the
+    registered ref to an exact Git commit, then derives deterministic plugin-owned
+    task, session, and run identities. The prepared admission, pinned commit,
+    worktree lease, and run plan are persisted before their corresponding effects.
+    Reusing `key` is accepted only when the host-computed fingerprint and owner
+    match. The sandbox/workspace authority preparation remains held through actual
+    run admission rather than acting as a preflight check.
+
+    Use `find`, `inspect`, and `cancel` with the same key. Successful inspection
+    requires a clean checkout whose `HEAD` is a descendant of the pinned base.
+    The host publishes that exact Git commit as the immutable artifact together
+    with a one-time hash of the host-captured terminal result. Terminal inspection
+    and cancellation release the exact durable worktree lease and attempt lossless
+    cleanup. A checkout that cannot be removed losslessly is recorded as retained;
+    a previously completed exact retirement is reconciled as released after restart.
+    Full repository, creation, owner, and checkout identity checks prevent an active
+    or replacement checkout from being released or deleted.
+
+    If run admission loses its reply, the retained record moves to
+    `admission_uncertain`. A same-request retry only reconciles the durable run
+    plan to the exact host-stamped plugin owner, request fingerprint, run ID, session
+    ID, and lifecycle revision. Session preparation alone is not a receipt: the host
+    stamps it only at final run acceptance, and never dispatches a second worker
+    without that durable acceptance receipt. Deterministic policy and authority
+    refusals are recorded as `failed` and are not retried; uncertain publication
+    or transport outcomes remain distinct. Cancellation is fenced to that same exact incarnation,
+    waits for terminal settlement before cleanup, and reconciles an uncertain abort
+    without touching a replacement run.
+
+    `admitVerifier({ key, agentId, message })` requires a different agent from
+    `verifierAgentAllowlist`, a fresh worktree checked out at the worker artifact
+    commit, and exactly read-only sandbox authority. The verifier record binds both
+    that commit and the worker result hash; `inspectVerifier` publishes a one-time
+    evidence hash. `cancelVerifier` applies the same exact-incarnation fencing and
+    lease cleanup as worker cancellation. Verifier admission uses the same
+    uncertain-outcome recovery rule and never inspects the mutable base ref or the
+    worker checkout.
+
+    ```json5
+    plugins: {
+      entries: {
+        "release-bot": {
+          managedRuns: {
+            enabled: true,
+            agentAllowlist: ["worker"],
+            verifierAgentAllowlist: ["reviewer"],
+            projects: [
+              {
+                projectId: "openclaw",
+                repoRoot: "/srv/openclaw",
+                baseRefs: ["refs/heads/main"],
+              },
+            ],
+          },
+        },
+      },
+    }
+    ```
+
+  </Accordion>
   <Accordion title="api.runtime.subagent">
     Launch and manage background subagent runs.
 

@@ -373,10 +373,10 @@ export function createAgentTurnService(
               requestDeliveryHint,
               requestLabel: request.label,
               ...(explicitSessionKey ? { explicitSessionKey } : {}),
-              pluginOwnerId:
-                freshEntry === undefined
-                  ? normalizeOptionalString(principal?.internal?.pluginRuntimeOwnerId)
-                  : undefined,
+              pluginOwnerId: normalizeOptionalString(
+                principal?.internal?.pluginRuntimeOwnerId,
+              ),
+              pluginManagedRun: principal?.internal?.pluginManagedRun,
               expectedExistingSessionId,
               hasRestoredCronContinuation: restoredCronContinuationIdentity !== undefined,
               requestedSessionId,

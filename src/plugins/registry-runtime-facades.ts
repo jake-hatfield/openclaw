@@ -79,6 +79,7 @@ export function createPluginRuntimeFacades(invokeSelectedRuntime: <T>(run: () =>
     sandbox: createRuntimeFacade<PluginRuntime["sandbox"]>(invokeSelectedRuntime, [
       "resolveWorkspaceAuthority",
       "prepareWorkspaceAuthority",
+      "withPreparedWorkspaceAuthority",
     ]),
   };
 }
