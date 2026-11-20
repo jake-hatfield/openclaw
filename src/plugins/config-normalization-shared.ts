@@ -96,9 +96,7 @@ function normalizePluginHooks(value: unknown): NormalizedPluginEntry["hooks"] {
   return Object.keys(hooks).length > 0 ? hooks : undefined;
 }
 
-function normalizePluginManagedRuns(
-  value: unknown,
-): NormalizedPluginEntry["managedRuns"] {
+function normalizePluginManagedRuns(value: unknown): NormalizedPluginEntry["managedRuns"] {
   if (!isRecord(value)) {
     return undefined;
   }
@@ -110,9 +108,7 @@ function normalizePluginManagedRuns(
         const projectId = typeof project.projectId === "string" ? project.projectId.trim() : "";
         const repoRoot = typeof project.repoRoot === "string" ? project.repoRoot.trim() : "";
         const baseRefs = normalizeArrayBackedTrimmedStringList(project.baseRefs);
-        return projectId && repoRoot && baseRefs?.length
-          ? [{ projectId, repoRoot, baseRefs }]
-          : [];
+        return projectId && repoRoot && baseRefs?.length ? [{ projectId, repoRoot, baseRefs }] : [];
       })
     : undefined;
   const normalized: NonNullable<NormalizedPluginEntry["managedRuns"]> = {};

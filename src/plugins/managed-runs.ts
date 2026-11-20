@@ -79,7 +79,9 @@ function deterministicRunId(
   taskName: string,
   fingerprint: string,
 ): string {
-  return "managed-" + kind + "-" + sha256(pluginId + "\0" + taskName + "\0" + fingerprint).slice(0, 32);
+  return (
+    "managed-" + kind + "-" + sha256(pluginId + "\0" + taskName + "\0" + fingerprint).slice(0, 32)
+  );
 }
 
 function requestFingerprint(params: {
@@ -184,7 +186,10 @@ function assertImmutableRecordIdentity(previous: ManagedRunRecord, next: Managed
   if (previous.immutableResultHash && previous.immutableResultHash !== next.immutableResultHash) {
     throw new Error("Managed run immutable result hash cannot be replaced.");
   }
-  if (previous.verifier?.evidenceHash && previous.verifier.evidenceHash !== next.verifier?.evidenceHash) {
+  if (
+    previous.verifier?.evidenceHash &&
+    previous.verifier.evidenceHash !== next.verifier?.evidenceHash
+  ) {
     throw new Error("Managed run verifier evidence hash cannot be replaced.");
   }
 }
@@ -230,7 +235,9 @@ export function createPluginManagedRunsRuntime(
     const record = await store.lookup(context.storeKey);
     assertCurrent();
     if (record && (record.version !== MANAGED_RUN_VERSION || record.pluginId !== pluginId)) {
-      throw new ManagedRunRefusalError("Managed run state owner or version does not match this runtime.");
+      throw new ManagedRunRefusalError(
+        "Managed run state owner or version does not match this runtime.",
+      );
     }
     return { ...context, record };
   };
@@ -277,7 +284,9 @@ export function createPluginManagedRunsRuntime(
     const cfg = runtime.config.current({ clone: true });
     const policy = normalizePluginsConfig(cfg.plugins).entries[pluginId]?.managedRuns;
     if (policy?.enabled !== true) {
-      throw new ManagedRunRefusalError('Managed runs are not enabled for plugin "' + pluginId + '".');
+      throw new ManagedRunRefusalError(
+        'Managed runs are not enabled for plugin "' + pluginId + '".',
+      );
     }
     return { cfg, policy };
   };
@@ -289,17 +298,27 @@ export function createPluginManagedRunsRuntime(
   ) => {
     const project = policy.projects?.find((candidate) => candidate.projectId === projectId);
     if (!project) {
-      throw new ManagedRunRefusalError('Managed run project "' + projectId + '" is not registered.');
+      throw new ManagedRunRefusalError(
+        'Managed run project "' + projectId + '" is not registered.',
+      );
     }
     if (!project.baseRefs.includes(baseRef)) {
       throw new ManagedRunRefusalError(
-        'Managed run base ref "' + baseRef + '" is not registered exactly for project "' + projectId + '".',
+        'Managed run base ref "' +
+          baseRef +
+          '" is not registered exactly for project "' +
+          projectId +
+          '".',
       );
     }
     return project;
   };
 
-  const assertAgentAllowed = (allowed: readonly string[] | undefined, agentId: string, kind: string) => {
+  const assertAgentAllowed = (
+    allowed: readonly string[] | undefined,
+    agentId: string,
+    kind: string,
+  ) => {
     if (!allowed?.includes(agentId)) {
       throw new ManagedRunRefusalError(
         "Managed run " + kind + ' agent "' + agentId + '" is not allowlisted.',
@@ -348,7 +367,9 @@ export function createPluginManagedRunsRuntime(
         validate(authority);
         const assertAuthorityCurrent = () => {
           assertCurrent();
-          if (sha256(JSON.stringify(runtime.config.current({ clone: true }))) !== configFingerprint) {
+          if (
+            sha256(JSON.stringify(runtime.config.current({ clone: true }))) !== configFingerprint
+          ) {
             throw new ManagedRunRefusalError(
               "Managed run configuration changed before run admission.",
             );
@@ -375,7 +396,9 @@ export function createPluginManagedRunsRuntime(
     });
     assertCurrent();
     if (!entry?.sessionId || !entry.lifecycleRevision) {
-      throw new ManagedRunStateError("Managed run session did not publish an exact session identity.");
+      throw new ManagedRunStateError(
+        "Managed run session did not publish an exact session identity.",
+      );
     }
     if (
       entry.pluginOwnerId !== pluginId ||
@@ -453,7 +476,10 @@ export function createPluginManagedRunsRuntime(
     }
   };
 
-  const cleanupWorker = async (storeKey: string, input: ManagedRunRecord): Promise<ManagedRunRecord> => {
+  const cleanupWorker = async (
+    storeKey: string,
+    input: ManagedRunRecord,
+  ): Promise<ManagedRunRecord> => {
     if (!input.worktree || input.lease?.status === "released") {
       return input;
     }
@@ -554,7 +580,8 @@ export function createPluginManagedRunsRuntime(
             lease: {
               status: "retained",
               updatedAt: now(),
-              error: "exact verifier worktree identity no longer exists; replacement was not touched",
+              error:
+                "exact verifier worktree identity no longer exists; replacement was not touched",
             },
           },
         }));
@@ -606,9 +633,12 @@ export function createPluginManagedRunsRuntime(
           lease: { status: "release_pending", updatedAt: now(), error: errorMessage(error) },
         },
       }));
-      throw new ManagedRunStateError("Managed run verifier worktree release outcome is uncertain.", {
-        cause: error,
-      });
+      throw new ManagedRunStateError(
+        "Managed run verifier worktree release outcome is uncertain.",
+        {
+          cause: error,
+        },
+      );
     }
   };
 
@@ -696,7 +726,9 @@ export function createPluginManagedRunsRuntime(
   const recoverVerifierAdmission = async (storeKey: string, record: ManagedRunRecord) => {
     const plan = record.verifier?.admission;
     if (!plan) {
-      throw new ManagedRunStateError("Managed run verifier uncertain admission has no durable run plan.");
+      throw new ManagedRunStateError(
+        "Managed run verifier uncertain admission has no durable run plan.",
+      );
     }
     let identity;
     try {
@@ -774,10 +806,9 @@ export function createPluginManagedRunsRuntime(
       });
     } catch (error) {
       if (!(error instanceof PluginWorktreeValidationError)) {
-        throw new ManagedRunStateError(
-          "Managed run artifact finalization outcome is uncertain.",
-          { cause: error },
-        );
+        throw new ManagedRunStateError("Managed run artifact finalization outcome is uncertain.", {
+          cause: error,
+        });
       }
       const failed = await mutate(current.storeKey, (latest) => ({
         ...latest,
@@ -825,8 +856,13 @@ export function createPluginManagedRunsRuntime(
       const project = requireProject(policy, projectId, baseRef);
       let existing = await store.lookup(context.storeKey);
       assertCurrent();
-      if (existing && (existing.version !== MANAGED_RUN_VERSION || existing.pluginId !== pluginId)) {
-        throw new ManagedRunRefusalError("Managed run task identity is owned by another plugin or version.");
+      if (
+        existing &&
+        (existing.version !== MANAGED_RUN_VERSION || existing.pluginId !== pluginId)
+      ) {
+        throw new ManagedRunRefusalError(
+          "Managed run task identity is owned by another plugin or version.",
+        );
       }
       const baseCommit =
         existing?.baseCommit ??
@@ -845,7 +881,9 @@ export function createPluginManagedRunsRuntime(
           existing.baseRef !== baseRef ||
           existing.agentId !== agentId)
       ) {
-        throw new ManagedRunRefusalError("Managed run deterministic task ownership collision detected.");
+        throw new ManagedRunRefusalError(
+          "Managed run deterministic task ownership collision detected.",
+        );
       }
       if (
         existing &&
@@ -894,7 +932,11 @@ export function createPluginManagedRunsRuntime(
         if (!inserted) {
           existing = await store.lookup(context.storeKey);
           assertCurrent();
-          if (!existing || existing.pluginId !== pluginId || existing.requestFingerprint !== fingerprint) {
+          if (
+            !existing ||
+            existing.pluginId !== pluginId ||
+            existing.requestFingerprint !== fingerprint
+          ) {
             throw new ManagedRunRefusalError(
               "Managed run deterministic task identity collided during preparation.",
             );
@@ -905,9 +947,7 @@ export function createPluginManagedRunsRuntime(
           ) {
             return await recoverWorkerAdmission(context.storeKey, existing);
           }
-          if (
-            !["prepared", "worktree_ready", "admission_uncertain"].includes(existing.status)
-          ) {
+          if (!["prepared", "worktree_ready", "admission_uncertain"].includes(existing.status)) {
             return existing;
           }
         }
@@ -1269,7 +1309,9 @@ export function createPluginManagedRunsRuntime(
           }));
         }
         if (!worktree) {
-          throw new ManagedRunStateError("Managed run verifier worktree identity was not published.");
+          throw new ManagedRunStateError(
+            "Managed run verifier worktree identity was not published.",
+          );
         }
         await runtime.worktrees.assertPinnedCommit({
           ...worktreeTarget(worktree, verifierTaskName),
@@ -1514,9 +1556,7 @@ export function createPluginManagedRunsRuntime(
               error: "exact verifier run was not abortable and has not settled",
             },
           }));
-          throw new ManagedRunStateError(
-            "Managed run verifier cancellation outcome is uncertain.",
-          );
+          throw new ManagedRunStateError("Managed run verifier cancellation outcome is uncertain.");
         }
         const settlement = await runtime.subagent.waitForRun({
           runId: execution.runId,

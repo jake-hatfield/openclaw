@@ -91,7 +91,10 @@ describe("managed plugin run Gateway trust boundary", () => {
     gateway.dispatch.mockResolvedValueOnce({ runId: "replacement-run", sessionKey: SESSION_KEY });
     await expect(runManaged()).rejects.toMatchObject({ outcome: "uncertain" });
 
-    gateway.dispatch.mockResolvedValueOnce({ runId: RUN_ID, sessionKey: "agent:worker:replacement" });
+    gateway.dispatch.mockResolvedValueOnce({
+      runId: RUN_ID,
+      sessionKey: "agent:worker:replacement",
+    });
     await expect(runManaged()).rejects.toMatchObject({ outcome: "uncertain" });
   });
 

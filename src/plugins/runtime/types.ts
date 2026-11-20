@@ -78,11 +78,7 @@ type PluginManagedWorktreeTarget = PluginManagedWorktree & PluginManagedWorktree
 
 type PluginManagedWorktreeReleaseResult = "released" | "already_retired" | "mismatch";
 
-type PluginManagedWorktreeRemovalResult =
-  | "removed"
-  | "already_retired"
-  | "retained"
-  | "mismatch";
+type PluginManagedWorktreeRemovalResult = "removed" | "already_retired" | "retained" | "mismatch";
 
 type SubagentRunResult = {
   runId: string;
@@ -316,15 +312,11 @@ export type PluginRuntime = PluginRuntimeCore & {
       commit: string;
     }) => Promise<"released" | "already_released" | "mismatch">;
     /** Require the exact managed checkout to still point at the immutable verifier commit. */
-    assertPinnedCommit: (
-      params: PluginManagedWorktreeTarget & { commit: string },
-    ) => Promise<void>;
+    assertPinnedCommit: (params: PluginManagedWorktreeTarget & { commit: string }) => Promise<void>;
     /** Legacy path release retained for existing plugin callers. */
     release: (params: { path: string }) => Promise<void>;
     /** Legacy owner-fenced path cleanup retained for existing plugin callers. */
-    removeIfLossless: (
-      params: { path: string } & PluginManagedWorktreeOwner,
-    ) => Promise<boolean>;
+    removeIfLossless: (params: { path: string } & PluginManagedWorktreeOwner) => Promise<boolean>;
     /** Idempotent cleanup fenced to the complete durable worktree incarnation. */
     releaseExact: (
       params: PluginManagedWorktreeTarget,

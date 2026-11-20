@@ -23,19 +23,20 @@ describe("managed run plugin policy", () => {
     if (!parsed.ok) {
       return;
     }
-    expect(normalizePluginsConfigWithResolver(parsed.config.plugins).entries.release?.managedRuns)
-      .toEqual({
-        enabled: true,
-        agentAllowlist: ["worker"],
-        verifierAgentAllowlist: ["reviewer"],
-        projects: [
-          {
-            projectId: "openclaw",
-            repoRoot: "/srv/openclaw",
-            baseRefs: ["refs/heads/main"],
-          },
-        ],
-      });
+    expect(
+      normalizePluginsConfigWithResolver(parsed.config.plugins).entries.release?.managedRuns,
+    ).toEqual({
+      enabled: true,
+      agentAllowlist: ["worker"],
+      verifierAgentAllowlist: ["reviewer"],
+      projects: [
+        {
+          projectId: "openclaw",
+          repoRoot: "/srv/openclaw",
+          baseRefs: ["refs/heads/main"],
+        },
+      ],
+    });
   });
 
   it("rejects empty exact base-ref registrations and unknown policy keys", () => {

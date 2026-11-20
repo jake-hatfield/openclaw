@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import type { PluginStateKeyedStore } from "../plugin-state/plugin-state-store.types.js";
 import { PluginSubagentAdmissionError } from "../plugin-sdk/error-runtime.js";
+import type { PluginStateKeyedStore } from "../plugin-state/plugin-state-store.types.js";
 import { createPluginManagedRunsRuntime } from "./managed-runs.js";
 import type { ManagedRunRecord } from "./runtime/types-managed-runs.js";
 import type { PluginRuntime } from "./runtime/types.js";
@@ -89,16 +89,18 @@ function createFixture(options?: {
       },
     },
   };
-  const createWorktree = vi.fn(async (params: { name: string; baseRef?: string; checkoutCommit?: string }) => ({
-    id: "wt-" + params.name,
-    path: "/worktrees/" + params.name,
-    branch: params.name,
-    repoRoot: "/repo/openclaw",
-    repoFingerprint: "repo-fingerprint",
-    baseRef: params.baseRef ?? "HEAD",
-    baseCommit: params.checkoutCommit ?? BASE_COMMIT,
-    createdAt: 500,
-  }));
+  const createWorktree = vi.fn(
+    async (params: { name: string; baseRef?: string; checkoutCommit?: string }) => ({
+      id: "wt-" + params.name,
+      path: "/worktrees/" + params.name,
+      branch: params.name,
+      repoRoot: "/repo/openclaw",
+      repoFingerprint: "repo-fingerprint",
+      baseRef: params.baseRef ?? "HEAD",
+      baseCommit: params.checkoutCommit ?? BASE_COMMIT,
+      createdAt: 500,
+    }),
+  );
   const run = vi.fn(
     async (params: {
       sessionKey: string;
@@ -149,8 +151,7 @@ function createFixture(options?: {
       try {
         return await callback({
           sandboxed: true,
-          workspaceAccess:
-            params.agentId === "reviewer" ? (options?.verifierAccess ?? "ro") : "rw",
+          workspaceAccess: params.agentId === "reviewer" ? (options?.verifierAccess ?? "ro") : "rw",
         });
       } finally {
         authorityHeld = false;
@@ -174,8 +175,7 @@ function createFixture(options?: {
     sandbox: {
       resolveWorkspaceAuthority: vi.fn((params: { agentId?: string }) => ({
         sandboxed: true,
-        workspaceAccess:
-          params.agentId === "reviewer" ? (options?.verifierAccess ?? "ro") : "rw",
+        workspaceAccess: params.agentId === "reviewer" ? (options?.verifierAccess ?? "ro") : "rw",
       })),
       withPreparedWorkspaceAuthority,
     },
@@ -268,9 +268,7 @@ describe("plugin managed runs", () => {
         cwd: admitted.worktree?.path,
       }),
     );
-    expect(admitted.execution?.sessionKey).toBe(
-      "agent:worker:subagent:" + admitted.taskName,
-    );
+    expect(admitted.execution?.sessionKey).toBe("agent:worker:subagent:" + admitted.taskName);
   });
 
   it("captures a host-inspected immutable artifact and verifies exactly that commit read-only", async () => {
@@ -450,9 +448,7 @@ describe("plugin managed runs", () => {
     await expect(fixture.managed.admit(workerRequest)).rejects.toThrow(
       "admission outcome is uncertain",
     );
-    await expect(fixture.managed.admit(workerRequest)).rejects.toThrow(
-      "ownership collision",
-    );
+    await expect(fixture.managed.admit(workerRequest)).rejects.toThrow("ownership collision");
     expect(fixture.run).toHaveBeenCalledTimes(1);
   });
 
@@ -499,9 +495,7 @@ describe("plugin managed runs", () => {
   it("reconciles an uncertain abort to terminal success without aborting a replacement", async () => {
     const fixture = createFixture();
     await fixture.managed.admit(workerRequest);
-    fixture.abortManagedRun.mockRejectedValueOnce(
-      new Error("abort response lost"),
-    );
+    fixture.abortManagedRun.mockRejectedValueOnce(new Error("abort response lost"));
 
     const reconciled = await fixture.managed.cancel({ key: workerRequest.key });
     expect(reconciled).toMatchObject({
@@ -574,9 +568,7 @@ describe("plugin managed runs", () => {
 
   it("reconciles a checkout already retired before cleanup publication", async () => {
     const fixture = createFixture();
-    fixture.release
-      .mockResolvedValueOnce("released")
-      .mockResolvedValueOnce("already_retired");
+    fixture.release.mockResolvedValueOnce("released").mockResolvedValueOnce("already_retired");
     vi.mocked(fixture.runtime.worktrees.removeIfLosslessExact).mockRejectedValueOnce(
       new Error("retirement response lost"),
     );
@@ -689,11 +681,14 @@ describe("plugin managed runs", () => {
       new Error("verifier evidence publication response lost"),
     );
 
-    await expect(
-      fixture.managed.inspectVerifier({ key: workerRequest.key }),
-    ).rejects.toThrow("publication outcome is uncertain");
+    await expect(fixture.managed.inspectVerifier({ key: workerRequest.key })).rejects.toThrow(
+      "publication outcome is uncertain",
+    );
     const recovered = await fixture.createManaged().inspectVerifier({ key: workerRequest.key });
-    expect(recovered.verifier).toMatchObject({ status: "succeeded", lease: { status: "released" } });
+    expect(recovered.verifier).toMatchObject({
+      status: "succeeded",
+      lease: { status: "released" },
+    });
     expect(fixture.run).toHaveBeenCalledTimes(2);
   });
 

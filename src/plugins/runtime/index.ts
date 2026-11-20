@@ -134,7 +134,9 @@ function createRuntimeLlmFacade(getConfig: PluginRuntimeBase["getConfig"]): Plug
 
 function createUnavailableManagedRunsRuntime(): PluginRuntime["managedRuns"] {
   const unavailable = () => {
-    throw new Error("Plugin managed runs are only available through a bound plugin registry runtime.");
+    throw new Error(
+      "Plugin managed runs are only available through a bound plugin registry runtime.",
+    );
   };
   return {
     admit: unavailable,
@@ -193,7 +195,9 @@ function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
     record.ownerId === params.ownerId;
   const withExactWorktree = async <T>(
     params: ExactWorktreeTarget,
-    run: (service: import("../../agents/worktrees/service.js").ManagedWorktreeService) => Promise<T>,
+    run: (
+      service: import("../../agents/worktrees/service.js").ManagedWorktreeService,
+    ) => Promise<T>,
   ): Promise<T | undefined> =>
     runWithLocalStateOwner({
       method: "worktrees.exact",
@@ -216,7 +220,9 @@ function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
     });
   const withExactCleanup = async <T>(
     params: ExactWorktreeTarget,
-    run: (service: import("../../agents/worktrees/service.js").ManagedWorktreeService) => Promise<T>,
+    run: (
+      service: import("../../agents/worktrees/service.js").ManagedWorktreeService,
+    ) => Promise<T>,
   ): Promise<T | "already_retired" | "mismatch"> =>
     runWithLocalStateOwner({
       method: "worktrees.exactCleanup",
@@ -368,7 +374,9 @@ function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
           "refs/openclaw/managed-runs/" +
           createHash("sha256")
             .update(
-              [params.repoFingerprint, params.id, params.ownerKind, params.ownerId, commit].join("\0"),
+              [params.repoFingerprint, params.id, params.ownerKind, params.ownerId, commit].join(
+                "\0",
+              ),
             )
             .digest("hex");
         const existing = await runGit(params.repoRoot, [
@@ -518,8 +526,10 @@ function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
         runLocal: async ({ env, config, assertCurrent }) => {
           const { ManagedWorktreeService } = await loadService();
           assertCurrent();
-          return await new ManagedWorktreeService({ env, getConfig: () => config })
-            .removeIfLosslessByPath(params.path, params, { commitGuard: assertCurrent });
+          return await new ManagedWorktreeService({
+            env,
+            getConfig: () => config,
+          }).removeIfLosslessByPath(params.path, params, { commitGuard: assertCurrent });
         },
       });
     },
@@ -531,9 +541,7 @@ function createRuntimeWorktrees(): PluginRuntime["worktrees"] {
     },
     async removeIfLosslessExact(params) {
       return await withExactCleanup(params, async (service) =>
-        (await service.removeIfLossless(params.id))
-          ? ("removed" as const)
-          : ("retained" as const),
+        (await service.removeIfLossless(params.id)) ? ("removed" as const) : ("retained" as const),
       );
     },
   };

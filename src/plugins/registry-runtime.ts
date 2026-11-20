@@ -13,7 +13,6 @@ import {
 } from "../plugin-state/plugin-state-store.js";
 import { createLazyRuntimeSurface } from "../shared/lazy-runtime.js";
 import { createPluginManagedRunsRuntime } from "./managed-runs.js";
-import type { ManagedRunRecord } from "./runtime/types-managed-runs.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
 import { createPluginRuntimeKeyedStore } from "./plugin-runtime-keyed-store.js";
 import { capturePluginStateOperationModuleSource } from "./plugin-state-operation-source.js";
@@ -38,6 +37,7 @@ import {
   withPluginRuntimePluginScope,
   withPluginRuntimeRegistryScope,
 } from "./runtime/gateway-request-scope.js";
+import type { ManagedRunRecord } from "./runtime/types-managed-runs.js";
 import type { PluginRuntime } from "./runtime/types.js";
 
 // A completed reaction must retain only the emptied holder, not the caller's registry closure.
