@@ -41,6 +41,7 @@ const LAZY_RUNTIME_PROPERTIES = {
   config: true,
   agent: true,
   subagent: true,
+  managedRuns: true,
   system: true,
   media: true,
   mediaUnderstanding: true,

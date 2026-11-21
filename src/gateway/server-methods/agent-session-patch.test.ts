@@ -64,6 +64,8 @@ async function buildCreationPatch(opts: {
   freshEntry?: SessionEntry;
   isSystemGatewayRun?: boolean;
   visibleRequest?: boolean;
+  pluginOwnerId?: string;
+  pluginManagedRun?: { version: 1; runId: string; requestFingerprint: string };
 }): Promise<AgentSessionPatchBuild> {
   const now = 1_000;
   return buildAgentSessionPatch({
@@ -77,6 +79,8 @@ async function buildCreationPatch(opts: {
     requestDeliveryHint: undefined,
     ...(opts.explicitSessionKey ? { explicitSessionKey: opts.explicitSessionKey } : {}),
     ...(opts.freshEntry?.sessionId ? { expectedExistingSessionId: opts.freshEntry.sessionId } : {}),
+    ...(opts.pluginOwnerId ? { pluginOwnerId: opts.pluginOwnerId } : {}),
+    ...(opts.pluginManagedRun ? { pluginManagedRun: opts.pluginManagedRun } : {}),
     hasRestoredCronContinuation: false,
     resetPolicy: resolveSessionResetPolicy({ resetType: "direct" }),
     now,
@@ -88,6 +92,51 @@ async function buildCreationPatch(opts: {
 }
 
 describe("agent session patch", () => {
+  it("creation-locks a managed-run session to its plugin identity", async () => {
+    const managedRun = { version: 1 as const, runId: "run-1", requestFingerprint: "fp-1" };
+    const { patch } = await buildCreationPatch({
+      pluginOwnerId: "plugin-1",
+      pluginManagedRun: managedRun,
+    });
+
+    expect(patch).toMatchObject({
+      pluginOwnerId: "plugin-1",
+      modelSelectionLocked: true,
+      pluginManagedRun: { ...managedRun, pluginId: "plugin-1" },
+    });
+    expect(patch.lifecycleRevision).toEqual(expect.any(String));
+  });
+
+  it("rotates lifecycle identity for an explicit replacement session", async () => {
+    const previous = {
+      sessionId: "previous",
+      lifecycleRevision: "previous-revision",
+      updatedAt: 1,
+    };
+    const { patch } = await buildAgentSessionPatch({
+      freshEntry: previous,
+      initialEntry: previous,
+      cfg: {},
+      sessionAgentId: "main",
+      canonicalSessionKey: "agent:main:replacement",
+      storePath: "/tmp/openclaw-replacement-session-test.json",
+      normalizedSpawned: {},
+      requestDeliveryHint: undefined,
+      requestedSessionId: "replacement",
+      hasRestoredCronContinuation: false,
+      resetPolicy: resolveSessionResetPolicy({ resetType: "direct" }),
+      now: 1_000,
+      isSystemGatewayRun: true,
+      visibleRequest: true,
+      fallbackSessionId: "fallback",
+      touchInteraction: false,
+    });
+
+    expect(patch.sessionId).toBe("replacement");
+    expect(patch.lifecycleRevision).toEqual(expect.any(String));
+    expect(patch.lifecycleRevision).not.toBe(previous.lifecycleRevision);
+  });
+
   it("clears agent status at the next human interaction boundary", async () => {
     const patch = await buildPatch(true);
     expect(Object.hasOwn(patch, "agentStatus")).toBe(true);

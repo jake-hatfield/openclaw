@@ -9,8 +9,10 @@ import { splitTrailingAuthProfile } from "../agents/model-ref-profile.js";
 import type { ModelRef } from "../agents/model-ref-shared.js";
 import type { AgentWaitResult } from "../agents/run-wait.types.js";
 import { resolveSessionModelRef } from "../agents/session-model-ref.js";
+import { createSubagentSessionListReadView } from "../agents/subagents/registry/subagent-registry-state.js";
 import { normalizeThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { PluginSubagentAdmissionError } from "../plugin-sdk/error-runtime.js";
 import { normalizePluginsConfig } from "../plugins/config-state.js";
 import { resolveConversationAccessAllowed } from "../plugins/hook-policy-decisions.js";
 import { compileModelAllowlist, type CompiledModelAllowlist } from "../plugins/model-allowlist.js";
@@ -157,6 +159,75 @@ export function createGatewaySubagentRuntime(
   overridePolicies: PluginSubagentOverridePolicies = {},
   runtimeLifetime?: AbortSignal,
 ): PluginRuntime["subagent"] {
+  const hasManagedRunAdmissionReceipt = async (params: {
+    sessionKey: string;
+    runId: string;
+    requestFingerprint: string;
+  }): Promise<boolean> => {
+    const scope = getPluginRuntimeGatewayRequestScope();
+    const pluginId = normalizeOptionalString(scope?.pluginId);
+    const context = getInProcessGatewayRequestContext(resolveGatewayContext);
+    if (!pluginId || !context) {
+      throw new Error("Managed-run receipt lookup requires a current plugin and Gateway binding.");
+    }
+    const cfg = context.getRuntimeConfig();
+    const { sessionAgentId: agentId } = resolveSessionAgentIdsStrict({
+      sessionKey: params.sessionKey,
+      config: cfg,
+    });
+    const target = await loadGatewaySessionEntryReadOnlyInWorker({
+      cfg,
+      key: params.sessionKey,
+      agentId,
+    });
+    const binding = target.entry?.pluginManagedRun;
+    return (
+      target.entry?.pluginOwnerId === pluginId &&
+      binding?.version === 1 &&
+      binding.pluginId === pluginId &&
+      binding.runId === params.runId &&
+      binding.requestFingerprint === params.requestFingerprint &&
+      typeof binding.acceptedAt === "number"
+    );
+  };
+  const requireManagedRunSession = async (params: {
+    runId: string;
+    sessionKey: string;
+    sessionId: string;
+    lifecycleRevision: string;
+    requestFingerprint: string;
+  }) => {
+    const scope = getPluginRuntimeGatewayRequestScope();
+    const pluginId = normalizeOptionalString(scope?.pluginId);
+    const context = getInProcessGatewayRequestContext(resolveGatewayContext);
+    if (!pluginId || !context) {
+      throw new Error("Managed-run control requires a current plugin and Gateway binding.");
+    }
+    const cfg = context.getRuntimeConfig();
+    const { sessionAgentId: agentId } = resolveSessionAgentIdsStrict({
+      sessionKey: params.sessionKey,
+      config: cfg,
+    });
+    const target = await loadGatewaySessionEntryReadOnlyInWorker({
+      cfg,
+      key: params.sessionKey,
+      agentId,
+    });
+    const binding = target.entry?.pluginManagedRun;
+    if (
+      target.entry?.sessionId !== params.sessionId ||
+      target.entry.lifecycleRevision !== params.lifecycleRevision ||
+      target.entry.pluginOwnerId !== pluginId ||
+      binding?.version !== 1 ||
+      binding.pluginId !== pluginId ||
+      binding.runId !== params.runId ||
+      binding.requestFingerprint !== params.requestFingerprint ||
+      typeof binding.acceptedAt !== "number"
+    ) {
+      throw new Error("Managed-run session incarnation, owner, or fingerprint no longer matches.");
+    }
+    return { pluginId };
+  };
   const authorizeModelOverride = (params: { provider?: string; model?: string }) => {
     const scope = getPluginRuntimeGatewayRequestScope();
     const overrideRequested = Boolean(params.provider || params.model);
@@ -490,6 +561,12 @@ export function createGatewaySubagentRuntime(
       );
       const scope = getPluginRuntimeGatewayRequestScope();
       const pluginId = normalizeOptionalString(scope?.pluginId);
+      if (params.managedRun && (!pluginId || params.managedRun.runId !== params.idempotencyKey)) {
+        throw new PluginSubagentAdmissionError(
+          "refused",
+          "Managed-run admission requires matching plugin identity and idempotency key.",
+        );
+      }
       const runtimePluginToolGrant = resolvePluginSubagentToolsAlsoAllow({
         pluginId,
         toolsAlsoAllow: params.toolsAlsoAllow,
@@ -547,45 +624,95 @@ export function createGatewaySubagentRuntime(
         // The command owns parsing. Replacing its input with this result would
         // apply non-idempotent provider aliases again; retain the authorized syntax.
       }
-      const payload = await dispatchGatewayMethodInProcess<{
-        runId?: string;
-        sessionKey?: string;
-        runtime?: unknown;
-      }>(
-        "agent",
-        {
-          sessionKey: params.sessionKey,
-          message: params.message,
-          deliver: params.deliver ?? false,
-          ...(allowOverride && params.provider && { provider: params.provider }),
-          ...(allowOverride && params.model && { model: params.model }),
-          ...(params.extraSystemPrompt && { extraSystemPrompt: params.extraSystemPrompt }),
-          ...(params.promptMode === "minimal" && { promptMode: params.promptMode }),
-          ...(params.lane && { lane: params.lane }),
-          ...(params.cwd && { cwd: params.cwd }),
-          ...(params.lightContext === true && { bootstrapContextMode: "lightweight" }),
-          // The Gateway agent schema requires a nonempty idempotency key.
-          idempotencyKey: params.idempotencyKey || randomUUID(),
-        },
-        {
-          allowSyntheticModelOverride,
-          sessionMutationCommitGuard,
-          agentRunTracking: "plugin_subagent",
-          ...(!scope?.client ? { operatorRoleActor: { kind: "system" as const } } : {}),
-          ...(pluginId ? { pluginRuntimeOwnerId: pluginId } : {}),
-          ...(pluginSubagentRequester ? { pluginSubagentRequester } : {}),
-          ...(runtimePluginToolGrant ? { runtimePluginToolGrant } : {}),
-          ...(params.disableTools === true ? { pluginSubagentToolsAllow: [] } : {}),
-          resolveGatewayContext,
-        },
-      );
+      let admissionAccepted = false;
+      let payload: { runId?: string; sessionKey?: string; runtime?: unknown };
+      try {
+        payload = await dispatchGatewayMethodInProcess<{
+          runId?: string;
+          sessionKey?: string;
+          runtime?: unknown;
+        }>(
+          "agent",
+          {
+            sessionKey: params.sessionKey,
+            message: params.message,
+            deliver: params.deliver ?? false,
+            ...(allowOverride && params.provider && { provider: params.provider }),
+            ...(allowOverride && params.model && { model: params.model }),
+            ...(params.extraSystemPrompt && { extraSystemPrompt: params.extraSystemPrompt }),
+            ...(params.promptMode === "minimal" && { promptMode: params.promptMode }),
+            ...(params.lane && { lane: params.lane }),
+            ...(params.cwd && { cwd: params.cwd }),
+            ...(params.lightContext === true && { bootstrapContextMode: "lightweight" }),
+            // The Gateway agent schema requires a nonempty idempotency key.
+            idempotencyKey: params.idempotencyKey || randomUUID(),
+          },
+          {
+            allowSyntheticModelOverride,
+            sessionMutationCommitGuard,
+            agentRunTracking: "plugin_subagent",
+            ...(!scope?.client ? { operatorRoleActor: { kind: "system" as const } } : {}),
+            ...(pluginId ? { pluginRuntimeOwnerId: pluginId } : {}),
+            ...(params.managedRun ? { pluginManagedRun: params.managedRun } : {}),
+            ...(pluginSubagentRequester ? { pluginSubagentRequester } : {}),
+            ...(runtimePluginToolGrant ? { runtimePluginToolGrant } : {}),
+            ...(params.disableTools === true ? { pluginSubagentToolsAllow: [] } : {}),
+            onAccepted: () => {
+              admissionAccepted = true;
+            },
+            resolveGatewayContext,
+          },
+        );
+      } catch (error) {
+        if (params.managedRun) {
+          let durableReceipt = false;
+          let receiptLookupUncertain = false;
+          try {
+            durableReceipt = await hasManagedRunAdmissionReceipt({
+              sessionKey: params.sessionKey,
+              runId: params.managedRun.runId,
+              requestFingerprint: params.managedRun.requestFingerprint,
+            });
+          } catch {
+            receiptLookupUncertain = true;
+          }
+          const uncertain = admissionAccepted || durableReceipt || receiptLookupUncertain;
+          throw new PluginSubagentAdmissionError(
+            uncertain ? "uncertain" : "refused",
+            uncertain
+              ? "Managed-run admission may have crossed the durable host boundary."
+              : "Managed-run admission was definitively refused before host acceptance.",
+            { cause: error },
+          );
+        }
+        throw error;
+      }
       const runId = payload?.runId;
       if (typeof runId !== "string" || !runId) {
         throw new Error("Gateway agent method returned an invalid runId.");
       }
       const sessionKey = payload?.sessionKey?.trim() || params.sessionKey;
+      if (
+        params.managedRun &&
+        (runId !== params.managedRun.runId || sessionKey !== params.sessionKey)
+      ) {
+        throw new PluginSubagentAdmissionError(
+          "uncertain",
+          "Managed-run host returned a mismatched accepted run or session identity.",
+        );
+      }
       const runtime = normalizePluginSubagentRunRuntime(payload?.runtime);
       return { runId, sessionKey, ...(runtime ? { runtime } : {}) };
+    },
+    async abortManagedRun(params) {
+      const { pluginId } = await requireManagedRunSession(params);
+      const payload = await dispatchGatewayMethodInProcess<{ aborted?: boolean }>(
+        "chat.abort",
+        { runId: params.runId, sessionKey: params.sessionKey },
+        { pluginRuntimeOwnerId: pluginId, resolveGatewayContext },
+      );
+      await requireManagedRunSession(params);
+      return { aborted: payload?.aborted === true };
     },
     async waitForRun(params) {
       const payload = await dispatchGatewayMethodInProcess<AgentWaitResult>(
@@ -599,6 +726,29 @@ export function createGatewaySubagentRuntime(
       const { status: waitStatus, error, ...metadata } = payload;
       const status =
         waitStatus === "error" && error?.trim().toLowerCase() === "completed" ? "ok" : waitStatus;
+      if (status === "timeout" && params.managedRun) {
+        const accepted = await hasManagedRunAdmissionReceipt({
+          sessionKey: params.managedRun.sessionKey,
+          runId: params.runId,
+          requestFingerprint: params.managedRun.requestFingerprint,
+        });
+        if (accepted) {
+          const view = createSubagentSessionListReadView({ env: process.env });
+          await view.prepare();
+          const persisted = view.runs(new Set([params.runId])).get(params.runId);
+          const outcome = persisted?.execution.outcome;
+          if (persisted?.execution.status === "terminal" && outcome) {
+            return {
+              status: outcome.status === "ok" ? "ok" : "error",
+              ...(outcome.status === "ok"
+                ? {}
+                : { error: outcome.error ?? persisted.endedReason ?? "managed run ended" }),
+              ...(outcome.startedAt !== undefined ? { startedAt: outcome.startedAt } : {}),
+              ...(outcome.endedAt !== undefined ? { endedAt: outcome.endedAt } : {}),
+            };
+          }
+        }
+      }
       return {
         ...metadata,
         status,

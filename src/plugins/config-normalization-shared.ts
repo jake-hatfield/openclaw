@@ -30,6 +30,7 @@ export type NormalizedPluginsConfig = {
       subagent?: SchemaContract<NonNullable<PluginEntryConfig["subagent"]>> & {
         hasAllowedModelsConfig?: boolean;
       };
+      managedRuns?: SchemaContract<NonNullable<PluginEntryConfig["managedRuns"]>>;
       llm?: SchemaContract<NonNullable<PluginEntryConfig["llm"]>> & {
         hasAllowedModelsConfig?: boolean;
         hasAllowedCompletionModelsConfig?: boolean;
@@ -95,6 +96,39 @@ function normalizePluginHooks(value: unknown): NormalizedPluginEntry["hooks"] {
   return Object.keys(hooks).length > 0 ? hooks : undefined;
 }
 
+function normalizePluginManagedRuns(value: unknown): NormalizedPluginEntry["managedRuns"] {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const projects = Array.isArray(value.projects)
+    ? value.projects.flatMap((project) => {
+        if (!isRecord(project)) {
+          return [];
+        }
+        const projectId = typeof project.projectId === "string" ? project.projectId.trim() : "";
+        const repoRoot = typeof project.repoRoot === "string" ? project.repoRoot.trim() : "";
+        const baseRefs = normalizeArrayBackedTrimmedStringList(project.baseRefs);
+        return projectId && repoRoot && baseRefs?.length ? [{ projectId, repoRoot, baseRefs }] : [];
+      })
+    : undefined;
+  const normalized: NonNullable<NormalizedPluginEntry["managedRuns"]> = {};
+  for (const key of ["enabled", "requireSandbox"] as const) {
+    if (typeof value[key] === "boolean") {
+      normalized[key] = value[key];
+    }
+  }
+  for (const key of ["agentAllowlist", "verifierAgentAllowlist"] as const) {
+    const entries = normalizeArrayBackedTrimmedStringList(value[key]);
+    if (entries) {
+      normalized[key] = entries;
+    }
+  }
+  if (projects) {
+    normalized.projects = projects;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
+
 function normalizePluginModelConfig(
   value: unknown,
   kind: "subagent" | "llm",
@@ -157,6 +191,8 @@ function normalizePluginEntries(
       subagent:
         normalizePluginModelConfig(entry.subagent, "subagent") ??
         normalized[normalizedKey]?.subagent,
+      managedRuns:
+        normalizePluginManagedRuns(entry.managedRuns) ?? normalized[normalizedKey]?.managedRuns,
       llm: normalizePluginModelConfig(entry.llm, "llm") ?? normalized[normalizedKey]?.llm,
       config: "config" in entry ? entry.config : normalized[normalizedKey]?.config,
     };

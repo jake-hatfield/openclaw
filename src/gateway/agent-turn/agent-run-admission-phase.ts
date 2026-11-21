@@ -28,6 +28,7 @@ import type { SubagentRunRecord } from "../../agents/subagents/registry/subagent
 import { isSameSubagentRunOwner } from "../../agents/subagents/registry/subagent-run-generation.js";
 import { captureRequesterCronAuthorityAdmissionAssertion } from "../../agents/subagents/requester-cron-authority.js";
 import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
+import { patchSessionEntryCore } from "../../config/sessions/session-accessor.js";
 import { assertAgentRunLifecycleGenerationCurrent } from "../../infra/agent-events.js";
 import { claimAgentRunContext } from "../../infra/agent-run-registry.js";
 import { runWithGatewayDetachedWorkContinuation } from "../../process/gateway-work-admission.js";
@@ -638,6 +639,58 @@ export async function prepareAgentRunDispatch(
         // acceptance or dispatch; failed preparation must leave the paused owner intact.
         await adoptParentResume();
         resumedTaskAdopted = true;
+        assertInputOwnerCurrent();
+        params.assertGatewayWorkAdmissionAllowed();
+        activeRunAbort.controller.signal.throwIfAborted();
+        capturedOperator.authority?.assertCurrent();
+      } catch (err) {
+        const failure = await releasePreparedAgentRunUserTurnAfterFailure(userTurn, err);
+        return rejectPreaccept(resolveAgentRunAdmissionError(ErrorCodes.UNAVAILABLE, failure));
+      }
+    }
+    const managedRun = params.client?.internal?.pluginManagedRun;
+    if (managedRun) {
+      try {
+        assertInputOwnerCurrent();
+        params.assertGatewayWorkAdmissionAllowed();
+        activeRunAbort.controller.signal.throwIfAborted();
+        capturedOperator.authority?.assertCurrent();
+        const pluginOwnerId = params.client?.internal?.pluginRuntimeOwnerId;
+        if (!pluginOwnerId || !params.resolvedSessionKey) {
+          throw new Error("Managed-run acceptance lost its plugin or session identity.");
+        }
+        const committed = await patchSessionEntryCore(
+          {
+            agentId: params.activeSessionAgentId,
+            sessionKey: params.resolvedSessionKey,
+            storePath: lifecycleStorePath,
+          },
+          (entry) => {
+            const binding = entry.pluginManagedRun;
+            if (
+              entry.sessionId !== params.getAdmittedSessionId() ||
+              entry.lifecycleRevision !== params.sessionEntry?.lifecycleRevision ||
+              entry.pluginOwnerId !== pluginOwnerId ||
+              entry.modelSelectionLocked !== true ||
+              binding?.version !== managedRun.version ||
+              binding.pluginId !== pluginOwnerId ||
+              binding.runId !== managedRun.runId ||
+              binding.requestFingerprint !== managedRun.requestFingerprint
+            ) {
+              throw new Error("Managed-run acceptance session identity no longer matches.");
+            }
+            return {
+              pluginManagedRun: {
+                ...binding,
+                acceptedAt: binding.acceptedAt ?? accepted.acceptedAt,
+              },
+            };
+          },
+          { requireWriteSuccess: true, skipMaintenance: true },
+        );
+        if (!committed) {
+          throw new Error("Managed-run acceptance receipt was not persisted.");
+        }
         assertInputOwnerCurrent();
         params.assertGatewayWorkAdmissionAllowed();
         activeRunAbort.controller.signal.throwIfAborted();

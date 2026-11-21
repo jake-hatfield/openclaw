@@ -167,6 +167,7 @@ describe("plugin-state-store.authority", () => {
                   forkSession: unexpectedSubagent,
                   run: unexpectedSubagent,
                   waitForRun: unexpectedSubagent,
+                  abortManagedRun: unexpectedSubagent,
                   getSessionMessages: unexpectedSubagent,
                   deleteSession: unexpectedSubagent,
                 },

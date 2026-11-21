@@ -41,6 +41,7 @@ export type DispatchGatewayMethodInProcessOptions = {
   onSignalAbort?: () => Promise<void> | void;
   operatorRoleActor?: GatewayOperatorRoleActor;
   pluginRuntimeOwnerId?: string;
+  pluginManagedRun?: { version: 1; runId: string; requestFingerprint: string };
   pluginSubagentRequester?: PluginSubagentRequesterContext;
   runtimePluginToolGrant?: RuntimePluginToolGrant;
   pluginSubagentToolsAllow?: string[];

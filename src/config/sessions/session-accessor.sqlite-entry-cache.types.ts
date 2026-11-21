@@ -43,6 +43,7 @@ export function projectSessionSharingEntry(entry: InternalSessionEntry) {
       : undefined,
     modelSelectionLocked: entry.modelSelectionLocked,
     pluginOwnerId: entry.pluginOwnerId,
+    pluginManagedRun: entry.pluginManagedRun ? { ...entry.pluginManagedRun } : undefined,
     skillLibrarySelections: entry.skillLibrarySelections
       ? structuredClone(entry.skillLibrarySelections)
       : undefined,

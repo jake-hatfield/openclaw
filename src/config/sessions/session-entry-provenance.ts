@@ -234,6 +234,15 @@ export type SessionEntryProvenance = {
   inheritedGitContributorProfileIds?: string[];
   /** Plugin id that owns this session through a trusted runtime creation seam. */
   pluginOwnerId?: string;
+  /** Immutable host-stamped managed-run admission binding for this logical session. */
+  pluginManagedRun?: {
+    version: 1;
+    pluginId: string;
+    runId: string;
+    requestFingerprint: string;
+    /** Written only at the final host admission boundary. */
+    acceptedAt?: number;
+  };
   /** External hook source that has contributed content to this transcript. */
   hookExternalContentSource?: HookExternalContentSource;
 };

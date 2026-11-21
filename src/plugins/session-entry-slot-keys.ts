@@ -84,6 +84,7 @@ const SESSION_ENTRY_RESERVED_SLOT_KEY_LIST = [
   "restartRecoveryOperatorSource",
   "subagentRecovery",
   "pluginOwnerId",
+  "pluginManagedRun",
   "systemSent",
   "abortedLastRun",
   "restartRecoveryRuns",

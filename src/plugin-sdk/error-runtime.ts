@@ -16,6 +16,20 @@ export class RequestScopedSubagentRuntimeError extends Error {
   }
 }
 
+/** Host classification for a plugin subagent admission failure. */
+export class PluginSubagentAdmissionError extends Error {
+  readonly code = "OPENCLAW_PLUGIN_SUBAGENT_ADMISSION";
+
+  constructor(
+    readonly outcome: "refused" | "uncertain",
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "PluginSubagentAdmissionError";
+  }
+}
+
 export {
   collectErrorGraphCandidates,
   extractErrorCode,

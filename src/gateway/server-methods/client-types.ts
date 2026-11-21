@@ -71,6 +71,12 @@ export type GatewayClient = Pick<
     allowModelOverride?: boolean;
     cronRunContinuation?: boolean;
     pluginRuntimeOwnerId?: string;
+    /** Host-only durable managed-run binding; never accepted from wire params. */
+    pluginManagedRun?: {
+      version: 1;
+      runId: string;
+      requestFingerprint: string;
+    };
     /** Host-attested session provenance for a trusted official plugin node invocation. */
     nodeInvokeApprovalSessionKey?: string;
     /** Plugin-owned in-process invoke hooks; never accepted from Gateway wire params. */

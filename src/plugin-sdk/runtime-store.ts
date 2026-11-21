@@ -2,6 +2,7 @@ import { getPluginInstanceRuntimeSlot } from "../plugins/plugin-instance-scope.j
 // Runtime store exports expose plugin runtime type contracts without loading runtime code.
 import { getNamedPluginRuntimeStoreSlot } from "./runtime-store-registry.js";
 export type { PluginRuntime } from "../plugins/runtime/types.js";
+export type * from "../plugins/runtime/types-managed-runs.js";
 type PluginRuntimeStoreKeyOptions = {
   /** Explicit global registry key for shared runtime slots. */
   key: string;
