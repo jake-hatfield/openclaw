@@ -9,6 +9,7 @@ import { splitTrailingAuthProfile } from "../agents/model-ref-profile.js";
 import type { ModelRef } from "../agents/model-ref-shared.js";
 import type { AgentWaitResult } from "../agents/run-wait.types.js";
 import { resolveSessionModelRef } from "../agents/session-model-ref.js";
+import { createSubagentSessionListReadView } from "../agents/subagents/registry/subagent-registry-state.js";
 import { normalizeThinkLevel } from "../auto-reply/thinking.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { PluginSubagentAdmissionError } from "../plugin-sdk/error-runtime.js";
@@ -725,6 +726,29 @@ export function createGatewaySubagentRuntime(
       const { status: waitStatus, error, ...metadata } = payload;
       const status =
         waitStatus === "error" && error?.trim().toLowerCase() === "completed" ? "ok" : waitStatus;
+      if (status === "timeout" && params.managedRun) {
+        const accepted = await hasManagedRunAdmissionReceipt({
+          sessionKey: params.managedRun.sessionKey,
+          runId: params.runId,
+          requestFingerprint: params.managedRun.requestFingerprint,
+        });
+        if (accepted) {
+          const view = createSubagentSessionListReadView({ env: process.env });
+          await view.prepare();
+          const persisted = view.runs(new Set([params.runId])).get(params.runId);
+          const outcome = persisted?.execution.outcome;
+          if (persisted?.execution.status === "terminal" && outcome) {
+            return {
+              status: outcome.status === "ok" ? "ok" : "error",
+              ...(outcome.status === "ok"
+                ? {}
+                : { error: outcome.error ?? persisted.endedReason ?? "managed run ended" }),
+              ...(outcome.startedAt !== undefined ? { startedAt: outcome.startedAt } : {}),
+              ...(outcome.endedAt !== undefined ? { endedAt: outcome.endedAt } : {}),
+            };
+          }
+        }
+      }
       return {
         ...metadata,
         status,

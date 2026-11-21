@@ -33,6 +33,21 @@ function createStore() {
         comparison: string,
         intent: { operation: "update"; action: "set"; value: ManagedRunRecord },
       ) => {
+        const assertJsonSafe = (value: unknown, path = "$"): void => {
+          if (value === undefined) {
+            throw new Error("undefined plugin state at " + path);
+          }
+          if (Array.isArray(value)) {
+            value.forEach((entry, index) => assertJsonSafe(entry, path + "[" + index + "]"));
+            return;
+          }
+          if (value && typeof value === "object") {
+            for (const [property, entry] of Object.entries(value)) {
+              assertJsonSafe(entry, path + "." + property);
+            }
+          }
+        };
+        assertJsonSafe(intent.value);
         if (comparison !== String(revision)) {
           return {
             status: "conflict" as const,
@@ -53,7 +68,7 @@ function createStore() {
 
 type SessionIdentity = {
   sessionId: string;
-  lifecycleRevision: string;
+  lifecycleRevision?: string;
   pluginOwnerId: string;
   modelSelectionLocked: boolean;
   pluginManagedRun?: {
@@ -134,11 +149,15 @@ function createFixture(options?: {
     commit: ARTIFACT_COMMIT,
     retentionRef: ARTIFACT_REF,
   }));
-  const releaseGitArtifact = vi.fn(async () => "released" as const);
-  const release = vi.fn(async () => "released" as const);
-  const waitForRun = vi.fn(async () => ({ status: "ok" as const }));
+  const releaseGitArtifact = vi.fn<PluginRuntime["worktrees"]["releaseGitArtifact"]>(
+    async () => "released",
+  );
+  const release = vi.fn<PluginRuntime["worktrees"]["releaseExact"]>(async () => "released");
+  const waitForRun = vi.fn<PluginRuntime["subagent"]["waitForRun"]>(async () => ({ status: "ok" }));
   const gatewayRequest = vi.fn(async () => ({ aborted: true }));
-  const abortManagedRun = vi.fn(async () => ({ aborted: true }));
+  const abortManagedRun = vi.fn<PluginRuntime["subagent"]["abortManagedRun"]>(async () => ({
+    aborted: true,
+  }));
   const withPreparedWorkspaceAuthority = vi.fn(
     async (
       params: { agentId?: string },
@@ -265,10 +284,56 @@ describe("plugin managed runs", () => {
     expect(fixture.run).toHaveBeenCalledWith(
       expect.objectContaining({
         idempotencyKey: admitted.execution?.runId,
-        cwd: admitted.worktree?.path,
       }),
     );
     expect(admitted.execution?.sessionKey).toBe("agent:worker:subagent:" + admitted.taskName);
+  });
+
+  it("binds sandboxed worker and verifier execution through prepared workspaces without cwd overrides", async () => {
+    const fixture = createFixture();
+    const worker = await fixture.managed.admit(workerRequest);
+
+    expect(fixture.withPreparedWorkspaceAuthority).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        agentId: "worker",
+        sessionKey: worker.execution?.sessionKey,
+        workspaceDir: worker.worktree?.path,
+      }),
+      expect.any(Function),
+    );
+    expect(fixture.run).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        sessionKey: worker.execution?.sessionKey,
+        idempotencyKey: worker.execution?.runId,
+      }),
+    );
+    expect(fixture.run.mock.calls[0]?.[0]).not.toHaveProperty("cwd");
+
+    await fixture.managed.inspect({ key: workerRequest.key });
+    const verified = await fixture.managed.admitVerifier({
+      key: workerRequest.key,
+      agentId: "reviewer",
+      message: "Verify the exact artifact",
+    });
+    expect(fixture.withPreparedWorkspaceAuthority).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        agentId: "reviewer",
+        sessionKey: verified.verifier?.execution?.sessionKey,
+        workspaceDir: verified.verifier?.worktree?.path,
+      }),
+      expect.any(Function),
+    );
+    expect(fixture.run).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        sessionKey: verified.verifier?.execution?.sessionKey,
+        idempotencyKey: verified.verifier?.execution?.runId,
+      }),
+    );
+    expect(fixture.run.mock.calls[1]?.[0]).not.toHaveProperty("cwd");
   });
 
   it("captures a host-inspected immutable artifact and verifies exactly that commit read-only", async () => {
@@ -390,6 +455,140 @@ describe("plugin managed runs", () => {
     expect(fixture.run).toHaveBeenCalledTimes(1);
   });
 
+  it("retires an interrupted accepted run whose durable session omitted lifecycle identity", async () => {
+    const fixture = createFixture();
+    fixture.run.mockImplementationOnce(async (params) => {
+      fixture.sessions.set(params.sessionKey, {
+        sessionId: "accepted-without-revision",
+        pluginOwnerId: "example-plugin",
+        modelSelectionLocked: true,
+        pluginManagedRun: {
+          ...params.managedRun!,
+          pluginId: "example-plugin",
+          acceptedAt: 1_001,
+        },
+      });
+      throw new Error("host crashed after durable acceptance");
+    });
+    fixture.waitForRun.mockResolvedValueOnce({
+      status: "error",
+      error: "interrupted by Gateway restart",
+    });
+
+    await expect(fixture.managed.admit(workerRequest)).rejects.toThrow(
+      "admission outcome is uncertain",
+    );
+    const retired = await fixture.createManaged().admit(workerRequest);
+
+    expect(retired).toMatchObject({
+      status: "failed",
+      lease: { status: "released" },
+      error: expect.stringContaining("did not publish lifecycleRevision"),
+    });
+    expect(retired).not.toHaveProperty("execution");
+    expect(fixture.run).toHaveBeenCalledTimes(1);
+    expect(fixture.abortManagedRun).not.toHaveBeenCalled();
+  });
+
+  it("keeps a missing-revision admission ambiguous while the exact run is not terminal", async () => {
+    const fixture = createFixture();
+    fixture.run.mockImplementationOnce(async (params) => {
+      fixture.sessions.set(params.sessionKey, {
+        sessionId: "accepted-without-revision",
+        pluginOwnerId: "example-plugin",
+        modelSelectionLocked: true,
+        pluginManagedRun: {
+          ...params.managedRun!,
+          pluginId: "example-plugin",
+          acceptedAt: 1_001,
+        },
+      });
+      throw new Error("response lost");
+    });
+    fixture.waitForRun.mockResolvedValueOnce({ status: "pending" });
+
+    await expect(fixture.managed.admit(workerRequest)).rejects.toThrow(
+      "admission outcome is uncertain",
+    );
+    await expect(fixture.createManaged().admit(workerRequest)).rejects.toThrow(
+      "has no lifecycleRevision and is not terminal",
+    );
+    expect(fixture.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retire a replaced or foreign session as the accepted run", async () => {
+    const fixture = createFixture();
+    fixture.run.mockImplementationOnce(async (params) => {
+      fixture.sessions.set(params.sessionKey, {
+        sessionId: "accepted-session",
+        lifecycleRevision: "accepted-revision",
+        pluginOwnerId: "example-plugin",
+        modelSelectionLocked: true,
+        pluginManagedRun: {
+          ...params.managedRun!,
+          pluginId: "example-plugin",
+          acceptedAt: 1_001,
+        },
+      });
+      throw new Error("response lost");
+    });
+
+    await expect(fixture.managed.admit(workerRequest)).rejects.toThrow(
+      "admission outcome is uncertain",
+    );
+    const plan = (await fixture.managed.find({ key: workerRequest.key }))!.admission!;
+    fixture.sessions.set(plan.sessionKey, {
+      sessionId: "replacement-session",
+      pluginOwnerId: "other-plugin",
+      modelSelectionLocked: true,
+    });
+
+    await expect(fixture.createManaged().admit(workerRequest)).rejects.toThrow(
+      "ownership collision",
+    );
+    expect(fixture.waitForRun).not.toHaveBeenCalled();
+    expect(fixture.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("replays the exact accepted run after the retired sandbox cwd preflight failure", async () => {
+    const fixture = createFixture();
+    fixture.run.mockImplementationOnce(async (params) => {
+      fixture.sessions.set(params.sessionKey, {
+        sessionId: "accepted-preflight-session",
+        lifecycleRevision: "accepted-preflight-generation",
+        pluginOwnerId: "example-plugin",
+        modelSelectionLocked: true,
+        pluginManagedRun: {
+          version: 1,
+          pluginId: "example-plugin",
+          runId: params.idempotencyKey!,
+          requestFingerprint: params.managedRun!.requestFingerprint,
+          acceptedAt: 1,
+        },
+      });
+      throw new Error(
+        "cwd override is not supported for sandboxed embedded agent runs; omit cwd or use the agent workspace as cwd",
+      );
+    });
+    fixture.waitForRun.mockResolvedValueOnce({
+      status: "error",
+      error:
+        "cwd override is not supported for sandboxed embedded agent runs; omit cwd or use the agent workspace as cwd",
+    });
+
+    await expect(fixture.managed.admit(workerRequest)).rejects.toThrow(
+      "admission outcome is uncertain",
+    );
+    const recovered = await fixture.createManaged().admit(workerRequest);
+    expect(recovered.status).toBe("running");
+    expect(recovered.execution?.sessionId).toBe(
+      fixture.sessions.get(recovered.admission!.sessionKey)?.sessionId,
+    );
+    expect(recovered.execution?.sessionId).not.toBe("accepted-preflight-session");
+    expect(fixture.run).toHaveBeenCalledTimes(2);
+    expect(fixture.run.mock.calls[1]?.[0]).not.toHaveProperty("cwd");
+  });
+
   it("never retries an uncertain admission when no exact accepted session can be proven", async () => {
     const fixture = createFixture();
     fixture.run.mockRejectedValueOnce(new Error("transport lost before proof"));
@@ -403,8 +602,9 @@ describe("plugin managed runs", () => {
     expect(fixture.run).toHaveBeenCalledTimes(1);
   });
 
-  it("classifies deterministic authority refusal as failed and does not retry it", async () => {
+  it("retries a proven pre-dispatch authority refusal with the same retained checkout", async () => {
     const fixture = createFixture();
+    vi.mocked(fixture.runtime.worktrees.removeIfLosslessExact).mockResolvedValueOnce("retained");
     fixture.withPreparedWorkspaceAuthority.mockImplementationOnce(
       async (_params, callback) =>
         await callback({ sandboxed: true, workspaceAccess: "none" } as never),
@@ -413,9 +613,18 @@ describe("plugin managed runs", () => {
     await expect(fixture.managed.admit(workerRequest)).rejects.toThrow(
       "requires exact rw workspace authority",
     );
-    expect((await fixture.managed.find({ key: workerRequest.key }))?.status).toBe("failed");
-    await expect(fixture.managed.admit(workerRequest)).resolves.toMatchObject({ status: "failed" });
+    expect(await fixture.managed.find({ key: workerRequest.key })).toMatchObject({
+      status: "failed",
+      lease: { status: "retained" },
+    });
     expect(fixture.run).not.toHaveBeenCalled();
+
+    await expect(fixture.managed.admit(workerRequest)).resolves.toMatchObject({
+      status: "running",
+    });
+    expect(fixture.createWorktree).toHaveBeenCalledOnce();
+    expect(fixture.runtime.worktrees.acquire).toHaveBeenCalledOnce();
+    expect(fixture.run).toHaveBeenCalledOnce();
   });
 
   it("does not retry a definitive host admission refusal after dispatch was attempted", async () => {
@@ -627,6 +836,47 @@ describe("plugin managed runs", () => {
       lifecycleRevision: admitted.verifier?.execution?.lifecycleRevision,
       requestFingerprint: admitted.verifier?.execution?.requestFingerprint,
     });
+    expect(fixture.run.mock.calls[1]?.[0]).not.toHaveProperty("cwd");
+  });
+
+  it("retires an interrupted accepted verifier whose durable session omitted lifecycle identity", async () => {
+    const fixture = createFixture();
+    await completeWorker(fixture);
+    fixture.run.mockImplementationOnce(async (params) => {
+      fixture.sessions.set(params.sessionKey, {
+        sessionId: "accepted-verifier-without-revision",
+        pluginOwnerId: "example-plugin",
+        modelSelectionLocked: true,
+        pluginManagedRun: {
+          ...params.managedRun!,
+          pluginId: "example-plugin",
+          acceptedAt: 1_001,
+        },
+      });
+      throw new Error("host crashed after durable verifier acceptance");
+    });
+    fixture.waitForRun.mockResolvedValueOnce({
+      status: "error",
+      error: "interrupted by Gateway restart",
+    });
+
+    await expect(
+      fixture.managed.admitVerifier({
+        key: workerRequest.key,
+        agentId: "reviewer",
+        message: "Verify it",
+      }),
+    ).rejects.toThrow("admission outcome is uncertain");
+    const retired = await fixture.createManaged().inspectVerifier({ key: workerRequest.key });
+
+    expect(retired.verifier).toMatchObject({
+      status: "failed",
+      lease: { status: "released" },
+      error: expect.stringContaining("did not publish lifecycleRevision"),
+    });
+    expect(retired.verifier).not.toHaveProperty("execution");
+    expect(fixture.run).toHaveBeenCalledTimes(2);
+    expect(fixture.abortManagedRun).not.toHaveBeenCalled();
   });
 
   it("refuses verifier dispatch when the immutable artifact checkout moved", async () => {

@@ -287,9 +287,14 @@ export async function buildAgentSessionPatch(
     ...(automaticResetReason && !freshSessionRotatedSinceLoad && params.freshEntry
       ? {
           ...clearRotatedSessionMetadata(params.freshEntry),
-          lifecycleRevision: randomUUID(),
           agentHarnessId: undefined,
         }
+      : {}),
+    // Every newly selected session incarnation needs a durable host identity before
+    // admission can become externally visible. Automatic resets already rotate the
+    // incarnation; this also covers first creation and explicit session replacement.
+    ...(reuse.isNewSession && !freshSessionRotatedSinceLoad
+      ? { lifecycleRevision: randomUUID() }
       : {}),
     sessionId: patchSessionId,
     updatedAt: params.now,

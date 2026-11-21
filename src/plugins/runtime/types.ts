@@ -94,6 +94,11 @@ type SubagentRunResult = {
 type SubagentWaitParams = {
   runId: string;
   timeoutMs?: number;
+  /** Exact durable admission receipt used only for restart-safe managed-run settlement. */
+  managedRun?: {
+    sessionKey: string;
+    requestFingerprint: string;
+  };
 };
 
 type SubagentAbortManagedRunParams = {

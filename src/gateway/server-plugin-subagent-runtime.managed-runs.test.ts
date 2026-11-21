@@ -8,6 +8,8 @@ const gateway = vi.hoisted(() => ({
   dispatch: vi.fn(),
   getContext: vi.fn(),
   loadSession: vi.fn(),
+  prepareSubagentReads: vi.fn(),
+  readSubagentRuns: vi.fn(),
 }));
 
 vi.mock("./server-plugin-in-process-dispatch.js", () => ({
@@ -18,6 +20,12 @@ vi.mock("./server-plugin-in-process-dispatch.js", () => ({
 }));
 vi.mock("./session-utils-store-worker.js", () => ({
   loadGatewaySessionEntryReadOnlyInWorker: gateway.loadSession,
+}));
+vi.mock("../agents/subagents/registry/subagent-registry-state.js", () => ({
+  createSubagentSessionListReadView: () => ({
+    prepare: gateway.prepareSubagentReads,
+    runs: gateway.readSubagentRuns,
+  }),
 }));
 
 const PLUGIN_ID = "managed-host-test";
@@ -66,6 +74,8 @@ beforeEach(() => {
   vi.clearAllMocks();
   gateway.getContext.mockReturnValue(context);
   gateway.loadSession.mockResolvedValue({ entry: undefined });
+  gateway.prepareSubagentReads.mockResolvedValue(undefined);
+  gateway.readSubagentRuns.mockReturnValue(new Map());
 });
 
 describe("managed plugin run Gateway trust boundary", () => {
@@ -157,6 +167,44 @@ describe("managed plugin run Gateway trust boundary", () => {
 
     gateway.loadSession.mockResolvedValueOnce(receipt({ pluginOwnerId: "other-plugin" }));
     await expect(runManaged()).rejects.toMatchObject({ outcome: "refused" });
+  });
+
+  it("recovers exact managed-run terminal settlement from durable registry after restart", async () => {
+    gateway.dispatch.mockResolvedValueOnce({ status: "timeout" });
+    gateway.loadSession.mockResolvedValueOnce(receipt({ lifecycleRevision: undefined }));
+    gateway.readSubagentRuns.mockReturnValueOnce(
+      new Map([
+        [
+          RUN_ID,
+          {
+            runId: RUN_ID,
+            childSessionKey: SESSION_KEY,
+            requesterSessionKey: "agent:worker:main",
+            createdAt: 100,
+            execution: {
+              status: "terminal",
+              outcome: { status: "error", error: "interrupted by Gateway restart", endedAt: 200 },
+            },
+          },
+        ],
+      ]),
+    );
+
+    const result = withPluginRuntimePluginScope({ pluginId: PLUGIN_ID }, () =>
+      runtime().waitForRun({
+        runId: RUN_ID,
+        timeoutMs: 0,
+        managedRun: { sessionKey: SESSION_KEY, requestFingerprint: FINGERPRINT },
+      }),
+    );
+
+    await expect(result).resolves.toEqual({
+      status: "error",
+      error: "interrupted by Gateway restart",
+      endedAt: 200,
+    });
+    expect(gateway.prepareSubagentReads).toHaveBeenCalledOnce();
+    expect(gateway.readSubagentRuns).toHaveBeenCalledWith(new Set([RUN_ID]));
   });
 
   it("fences cancellation to the exact session and run identity across dispatch", async () => {

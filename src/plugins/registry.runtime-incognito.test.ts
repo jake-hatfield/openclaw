@@ -90,6 +90,7 @@ function registry() {
       forkSession: async () => ({ text: "" }),
       run: subagentRun,
       waitForRun: async () => ({ status: "ok" }),
+      abortManagedRun: async () => ({ aborted: true }),
       getSessionMessages: async () => ({ messages: [] }),
       deleteSession: async () => {},
     },

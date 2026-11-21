@@ -87,6 +87,7 @@ function createChannelOwner(
     forkSession: vi.fn<PluginRuntime["subagent"]["forkSession"]>(),
     run: vi.fn<PluginRuntime["subagent"]["run"]>(),
     waitForRun: vi.fn<PluginRuntime["subagent"]["waitForRun"]>(),
+    abortManagedRun: vi.fn<PluginRuntime["subagent"]["abortManagedRun"]>(),
     getSessionMessages: vi.fn<PluginRuntime["subagent"]["getSessionMessages"]>(),
     deleteSession: vi.fn<PluginRuntime["subagent"]["deleteSession"]>(),
   };

@@ -12,7 +12,6 @@ import type {
   ManagedRunGitArtifact,
   ManagedRunRecord,
   ManagedRunStatus,
-  ManagedRunVerifierRecord,
   ManagedRunWorktreeIdentity,
   PluginRuntimeManagedRuns,
 } from "./runtime/types-managed-runs.js";
@@ -194,6 +193,34 @@ function assertImmutableRecordIdentity(previous: ManagedRunRecord, next: Managed
   }
 }
 
+function managedWaitParams(
+  execution: Pick<ManagedRunExecutionPlan, "runId" | "sessionKey" | "requestFingerprint">,
+  timeoutMs?: number,
+) {
+  return {
+    runId: execution.runId,
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    managedRun: {
+      sessionKey: execution.sessionKey,
+      requestFingerprint: execution.requestFingerprint,
+    },
+  };
+}
+
+function stripUndefined(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(stripUndefined);
+  }
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, entry]) => entry !== undefined)
+        .map(([key, entry]) => [key, stripUndefined(entry)]),
+    );
+  }
+  return value;
+}
+
 function statusFromWait(
   wait: Awaited<ReturnType<PluginRuntime["subagent"]["waitForRun"]>>,
 ): ManagedRunStatus | undefined {
@@ -255,7 +282,11 @@ export function createPluginManagedRunsRuntime(
     }
     assertCurrent();
     const current = requireRecord(observation.value, storeKey);
-    const next = update(structuredClone(current));
+    // Plugin state is strict JSON. Managed records use optional properties, and several
+    // transitions intentionally clear them with undefined. Normalize those properties
+    // away before publication so compareAndApply receives the same JSON image that the
+    // retained store can persist.
+    const next = stripUndefined(update(structuredClone(current))) as ManagedRunRecord;
     assertImmutableRecordIdentity(current, next);
     assertCurrent();
     let result;
@@ -395,7 +426,7 @@ export function createPluginManagedRunsRuntime(
       readConsistency: "latest",
     });
     assertCurrent();
-    if (!entry?.sessionId || !entry.lifecycleRevision) {
+    if (!entry?.sessionId) {
       throw new ManagedRunStateError(
         "Managed run session did not publish an exact session identity.",
       );
@@ -411,6 +442,11 @@ export function createPluginManagedRunsRuntime(
     ) {
       throw new ManagedRunRefusalError(
         "Managed run session ownership collision or unlocked plugin session was detected.",
+      );
+    }
+    if (!entry.lifecycleRevision) {
+      throw new ManagedRunStateError(
+        "Managed run session did not publish an exact session identity.",
       );
     }
     return { sessionId: entry.sessionId, lifecycleRevision: entry.lifecycleRevision };
@@ -697,7 +733,11 @@ export function createPluginManagedRunsRuntime(
     }
   };
 
-  const recoverWorkerAdmission = async (storeKey: string, record: ManagedRunRecord) => {
+  const recoverWorkerAdmission = async (
+    storeKey: string,
+    record: ManagedRunRecord,
+    retry?: { message: string; cfg: OpenClawConfig; requireSandbox: boolean },
+  ) => {
     const plan = record.admission;
     if (!plan) {
       throw new ManagedRunStateError("Managed run uncertain admission has no durable run plan.");
@@ -709,10 +749,92 @@ export function createPluginManagedRunsRuntime(
       if (error instanceof ManagedRunRefusalError) {
         throw error;
       }
+      const entry = await runtime.agent.session.getSessionEntryAsync({
+        agentId: plan.agentId,
+        sessionKey: plan.sessionKey,
+        readConsistency: "latest",
+      });
+      assertCurrent();
+      const binding = entry?.pluginManagedRun;
+      const exactAcceptedSession =
+        Boolean(entry?.sessionId) &&
+        !entry?.lifecycleRevision &&
+        entry?.pluginOwnerId === pluginId &&
+        entry?.modelSelectionLocked === true &&
+        binding?.version === MANAGED_RUN_VERSION &&
+        binding.pluginId === pluginId &&
+        binding.runId === plan.runId &&
+        binding.requestFingerprint === plan.requestFingerprint &&
+        typeof binding.acceptedAt === "number";
+      if (exactAcceptedSession) {
+        const settlement = await runtime.subagent.waitForRun(managedWaitParams(plan, 0));
+        assertCurrent();
+        if (!statusFromWait(settlement)) {
+          throw new ManagedRunStateError(
+            "Managed run accepted session has no lifecycleRevision and is not terminal; no replacement was dispatched.",
+            { cause: error },
+          );
+        }
+        const failed = await mutate(storeKey, (latest) => ({
+          ...latest,
+          status: "failed",
+          updatedAt: now(),
+          error:
+            "Accepted managed run reached terminal state but its durable session did not publish lifecycleRevision; " +
+            "the unprovable lifecycle identity was retired without replacement.",
+        }));
+        return await cleanupWorker(storeKey, failed);
+      }
       throw new ManagedRunStateError(
         "Managed run admission remains uncertain; no second worker was dispatched.",
         { cause: error },
       );
+    }
+    if (retry) {
+      const wait = await runtime.subagent.waitForRun(managedWaitParams(plan, 0));
+      const failure = wait.error ?? wait.stopReason;
+      if (
+        wait.status === "error" &&
+        failure ===
+          "cwd override is not supported for sandboxed embedded agent runs; omit cwd or use the agent workspace as cwd"
+      ) {
+        const retried = await withAuthority({
+          cfg: retry.cfg,
+          agentId: plan.agentId,
+          sessionKey: plan.sessionKey,
+          workspaceDir: plan.worktree.path,
+          access: "rw",
+          requireSandbox: retry.requireSandbox,
+          run: async (assertAuthorityCurrent) =>
+            await runtime.subagent.run({
+              assertCurrent: assertAuthorityCurrent,
+              sessionKey: plan.sessionKey,
+              message:
+                retry.message +
+                "\n\nHost output contract: commit all intended changes and leave the managed " +
+                "checkout clean; the host will use the exact resulting Git commit as the artifact.",
+              promptMode: "minimal",
+              deliver: false,
+              idempotencyKey: plan.runId,
+              managedRun: {
+                version: MANAGED_RUN_VERSION,
+                runId: plan.runId,
+                requestFingerprint: plan.requestFingerprint,
+              },
+            }),
+        });
+        if (
+          retried.runId !== plan.runId ||
+          (retried.sessionKey ?? plan.sessionKey) !== plan.sessionKey
+        ) {
+          throw new ManagedRunStateError(
+            "Managed run preflight recovery returned a mismatched deterministic identity.",
+          );
+        }
+        // The replay may race a session replacement. Publish only the identity observed
+        // after the deterministic replay was accepted.
+        identity = await sessionIdentity(plan);
+      }
     }
     return await mutate(storeKey, (latest) => ({
       ...latest,
@@ -736,6 +858,45 @@ export function createPluginManagedRunsRuntime(
     } catch (error) {
       if (error instanceof ManagedRunRefusalError) {
         throw error;
+      }
+      const entry = await runtime.agent.session.getSessionEntryAsync({
+        agentId: plan.agentId,
+        sessionKey: plan.sessionKey,
+        readConsistency: "latest",
+      });
+      assertCurrent();
+      const binding = entry?.pluginManagedRun;
+      const exactAcceptedSession =
+        Boolean(entry?.sessionId) &&
+        !entry?.lifecycleRevision &&
+        entry?.pluginOwnerId === pluginId &&
+        entry?.modelSelectionLocked === true &&
+        binding?.version === MANAGED_RUN_VERSION &&
+        binding.pluginId === pluginId &&
+        binding.runId === plan.runId &&
+        binding.requestFingerprint === plan.requestFingerprint &&
+        typeof binding.acceptedAt === "number";
+      if (exactAcceptedSession) {
+        const settlement = await runtime.subagent.waitForRun(managedWaitParams(plan, 0));
+        assertCurrent();
+        if (!statusFromWait(settlement)) {
+          throw new ManagedRunStateError(
+            "Managed run verifier accepted session has no lifecycleRevision and is not terminal; no replacement was dispatched.",
+            { cause: error },
+          );
+        }
+        const failed = await mutate(storeKey, (latest) => ({
+          ...latest,
+          updatedAt: now(),
+          verifier: {
+            ...latest.verifier!,
+            status: "failed",
+            error:
+              "Accepted managed run verifier reached terminal state but its durable session did not publish lifecycleRevision; " +
+              "the unprovable lifecycle identity was retired without replacement.",
+          },
+        }));
+        return await cleanupVerifier(storeKey, failed);
       }
       throw new ManagedRunStateError(
         "Managed run verifier admission remains uncertain; no second verifier was dispatched.",
@@ -771,10 +932,7 @@ export function createPluginManagedRunsRuntime(
     await assertExecutionSessionCurrent(execution);
     let hash = record.immutableResultHash;
     if (!hash) {
-      const wait = await runtime.subagent.waitForRun({
-        runId: execution.runId,
-        ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-      });
+      const wait = await runtime.subagent.waitForRun(managedWaitParams(execution, timeoutMs));
       assertCurrent();
       const status = statusFromWait(wait);
       if (!status) {
@@ -890,7 +1048,31 @@ export function createPluginManagedRunsRuntime(
         ["admitting", "admission_uncertain"].includes(existing.status) &&
         existing.admission
       ) {
-        return await recoverWorkerAdmission(context.storeKey, existing);
+        return await recoverWorkerAdmission(context.storeKey, existing, {
+          message,
+          cfg,
+          requireSandbox: policy.requireSandbox !== false,
+        });
+      }
+      // Workspace-authority validation runs before subagent dispatch. If that deterministic
+      // pre-dispatch refusal retained the exact checkout, the same fingerprint can safely
+      // reacquire it after configuration is corrected; no worker identity ever existed.
+      if (
+        existing?.status === "failed" &&
+        !existing.execution &&
+        existing.admission &&
+        existing.worktree &&
+        existing.lease?.status === "retained" &&
+        existing.error?.startsWith("Managed run requires exact ") &&
+        existing.error.includes(" workspace authority:")
+      ) {
+        existing = await mutate(context.storeKey, (latest) => ({
+          ...latest,
+          status: "worktree_ready",
+          updatedAt: now(),
+          lease: { status: "leased", updatedAt: now() },
+          error: undefined,
+        }));
       }
       if (
         existing &&
@@ -1036,7 +1218,6 @@ export function createPluginManagedRunsRuntime(
                 message +
                 "\n\nHost output contract: commit all intended changes and leave the managed " +
                 "checkout clean; the host will use the exact resulting Git commit as the artifact.",
-              cwd: worktree.path,
               promptMode: "minimal",
               deliver: false,
               idempotencyKey: plan.runId,
@@ -1080,6 +1261,7 @@ export function createPluginManagedRunsRuntime(
           throw new AggregateError(
             [error, publicationError],
             "Managed run admission outcome and recovery publication are uncertain.",
+            { cause: publicationError },
           );
         }
         if (!uncertain) {
@@ -1152,10 +1334,7 @@ export function createPluginManagedRunsRuntime(
             "Managed run cancellation outcome is uncertain; exact-run reconciliation is required.",
           );
         }
-        const settlement = await runtime.subagent.waitForRun({
-          runId: execution.runId,
-          timeoutMs: 30_000,
-        });
+        const settlement = await runtime.subagent.waitForRun(managedWaitParams(execution, 30_000));
         assertCurrent();
         if (!statusFromWait(settlement)) {
           await mutate(current.storeKey, (latest) => ({
@@ -1354,7 +1533,6 @@ export function createPluginManagedRunsRuntime(
                 workerResultHash +
                 "). The checkout is pinned read-only to that commit.\n\n" +
                 message,
-              cwd: worktree.path,
               promptMode: "minimal",
               deliver: false,
               idempotencyKey: plan.runId,
@@ -1430,10 +1608,7 @@ export function createPluginManagedRunsRuntime(
       await assertExecutionSessionCurrent(execution);
       let hash = verifier.evidenceHash;
       if (!hash) {
-        const wait = await runtime.subagent.waitForRun({
-          runId: execution.runId,
-          ...(timeoutMs !== undefined ? { timeoutMs } : {}),
-        });
+        const wait = await runtime.subagent.waitForRun(managedWaitParams(execution, timeoutMs));
         assertCurrent();
         const status = statusFromWait(wait);
         if (!status) {
@@ -1558,10 +1733,7 @@ export function createPluginManagedRunsRuntime(
           }));
           throw new ManagedRunStateError("Managed run verifier cancellation outcome is uncertain.");
         }
-        const settlement = await runtime.subagent.waitForRun({
-          runId: execution.runId,
-          timeoutMs: 30_000,
-        });
+        const settlement = await runtime.subagent.waitForRun(managedWaitParams(execution, 30_000));
         if (!statusFromWait(settlement)) {
           await mutate(current.storeKey, (latest) => ({
             ...latest,

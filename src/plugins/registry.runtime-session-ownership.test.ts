@@ -359,6 +359,7 @@ describe("plugin registry runtime session ownership", () => {
       forkSession: vi.fn(async () => ({ text: "completed" })),
       run: vi.fn(async () => ({ runId: "subagent-run" })),
       waitForRun: vi.fn(async () => ({ status: "ok" as const })),
+      abortManagedRun: vi.fn<PluginRuntime["subagent"]["abortManagedRun"]>(),
       getSessionMessages: vi.fn(async () => ({ messages: [] })),
       deleteSession: vi.fn(async () => {}),
     } satisfies PluginRuntime["subagent"];
